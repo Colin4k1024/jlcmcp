@@ -1,5 +1,5 @@
 # jlceda-mcp-server
-
+# 本项目上传的文件完全由opus4.6完成，有问题请问agent
 嘉立创 EDA MCP Server — 让 AI 编程助手直接操控嘉立创 EDA 的 PCB 自动化工具集。
 
 通过 [Model Context Protocol](https://modelcontextprotocol.io/) 暴露 39 个 PCB/原理图工具，在 Claude Code / Cursor / Windsurf 等 AI IDE 中直接执行元件移动、走线、铺铜、DRC 等操作。内置 PCB Agent 可自主编排多步操作完成复杂任务。
