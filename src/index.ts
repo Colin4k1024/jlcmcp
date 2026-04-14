@@ -12,6 +12,14 @@ import { registerAgentTools } from './tools/agent.js';
 import { registerCalculatorTools } from './tools/calculators.js';
 import { registerLayerTools } from './tools/layer.js';
 import { registerManufactureTools } from './tools/manufacture.js';
+import { registerProjectTools } from './tools/project.js';
+import { registerPcbPrimitivesTools } from './tools/pcb-primitives.js';
+import { registerPcbNetTools } from './tools/pcb-net.js';
+import { registerPcbDrcTools } from './tools/pcb-drc.js';
+import { registerPcbDocumentTools } from './tools/pcb-document.js';
+import { registerLibraryTools } from './tools/library.js';
+import { registerEditorTools } from './tools/editor.js';
+import { registerSystemTools } from './tools/system.js';
 
 async function main() {
   const bridge = new BridgeClient();
@@ -33,6 +41,14 @@ async function main() {
   registerCalculatorTools(server);
   registerLayerTools(server, bridge);
   registerManufactureTools(server, bridge);
+  registerProjectTools(server, bridge);
+  registerPcbPrimitivesTools(server, bridge);
+  registerPcbNetTools(server, bridge);
+  registerPcbDrcTools(server, bridge);
+  registerPcbDocumentTools(server, bridge);
+  registerLibraryTools(server, bridge);
+  registerEditorTools(server, bridge);
+  registerSystemTools(server, bridge);
 
   // Connect bridge (lazy — will connect on first command)
   // Start MCP stdio transport

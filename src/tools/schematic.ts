@@ -123,6 +123,21 @@ export function registerSchematicTools(server: any, bridge: BridgeClient) {
     return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
   });
 
+  server.tool('sch_modify_props', '修改原理图元件属性（value/designator 等）', {
+    primitiveId: z.string().describe('元件图元 ID'),
+    properties: z.record(z.any()).describe('属性键值对，如 { value: "100nF" } 或 { designator: "R1", value: "10K" }'),
+  }, async ({ primitiveId, properties }: { primitiveId: string; properties: Record<string, any> }) => {
+    const data = await bridge.command('sch_modify_props', { primitiveId, properties });
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool('sch_delete_component', '删除原理图元件', {
+    primitiveId: z.string().describe('元件图元 ID'),
+  }, async ({ primitiveId }: { primitiveId: string }) => {
+    const data = await bridge.command('sch_delete_component', { primitiveId });
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
   server.tool('sch_delete_all_wires', '删除原理图中所有导线', {}, async () => {
     const data = await bridge.command('sch_delete_all_wires');
     return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
@@ -165,6 +180,136 @@ export function registerSchematicTools(server: any, bridge: BridgeClient) {
     if (lcscIds) params.lcscIds = lcscIds;
     else if (lcsc) params.lcsc = lcsc;
     const data = await bridge.command('lib_device_lookup', params);
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  // ── P1.2: 原理图图元完整覆盖 ───────────────────────────────────────────────
+  server.tool('sch_create_net_flag', '在原理图中创建网络标志（如 GND 符号）', {
+    name: z.string().describe('网络名称，如 GND、VCC'),
+    x: z.number().describe('X 坐标（mil）'),
+    y: z.number().describe('Y 坐标（mil）'),
+    rotation: z.number().optional().describe('旋转角度，默认 0'),
+  }, async ({ name, x, y, rotation }: { name: string; x: number; y: number; rotation?: number }) => {
+    const data = await bridge.command('sch_create_net_flag', { name, x, y, rotation: rotation ?? 0 });
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool('sch_create_net_port', '在原理图中创建网络端口（页间连接符）', {
+    name: z.string().describe('端口名称'),
+    x: z.number().describe('X 坐标（mil）'),
+    y: z.number().describe('Y 坐标（mil）'),
+    rotation: z.number().optional().describe('旋转角度，默认 0'),
+  }, async ({ name, x, y, rotation }: { name: string; x: number; y: number; rotation?: number }) => {
+    const data = await bridge.command('sch_create_net_port', { name, x, y, rotation: rotation ?? 0 });
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool('sch_create_rectangle', '在原理图中绘制矩形', {
+    x1: z.number().describe('左上角 X（mil）'),
+    y1: z.number().describe('左上角 Y（mil）'),
+    x2: z.number().describe('右下角 X（mil）'),
+    y2: z.number().describe('右下角 Y（mil）'),
+  }, async ({ x1, y1, x2, y2 }: { x1: number; y1: number; x2: number; y2: number }) => {
+    const data = await bridge.command('sch_create_rectangle', { x1, y1, x2, y2 });
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool('sch_create_text', '在原理图中添加文字标注', {
+    text: z.string().describe('文字内容'),
+    x: z.number().describe('X 坐标（mil）'),
+    y: z.number().describe('Y 坐标（mil）'),
+    fontSize: z.number().optional().describe('字号（mil），默认 14'),
+    rotation: z.number().optional().describe('旋转角度，默认 0'),
+  }, async ({ text, x, y, fontSize, rotation }: { text: string; x: number; y: number; fontSize?: number; rotation?: number }) => {
+    const data = await bridge.command('sch_create_text', { text, x, y, fontSize: fontSize ?? 14, rotation: rotation ?? 0 });
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool('sch_create_circle', '在原理图中绘制圆形', {
+    x: z.number().describe('圆心 X（mil）'),
+    y: z.number().describe('圆心 Y（mil）'),
+    radius: z.number().describe('半径（mil）'),
+  }, async ({ x, y, radius }: { x: number; y: number; radius: number }) => {
+    const data = await bridge.command('sch_create_circle', { x, y, radius });
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool('sch_create_polygon', '在原理图中绘制多边形', {
+    points: z.array(z.object({ x: z.number(), y: z.number() })).min(3).describe('顶点数组，至少 3 个点'),
+  }, async ({ points }: { points: Array<{ x: number; y: number }> }) => {
+    const data = await bridge.command('sch_create_polygon', { points });
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool('sch_create_arc', '在原理图中绘制弧线', {
+    cx: z.number().describe('圆心 X（mil）'),
+    cy: z.number().describe('圆心 Y（mil）'),
+    radius: z.number().describe('半径（mil）'),
+    startAngle: z.number().describe('起始角度（度）'),
+    endAngle: z.number().describe('结束角度（度）'),
+  }, async ({ cx, cy, radius, startAngle, endAngle }: { cx: number; cy: number; radius: number; startAngle: number; endAngle: number }) => {
+    const data = await bridge.command('sch_create_arc', { cx, cy, radius, startAngle, endAngle });
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool('sch_create_bus', '在原理图中绘制总线', {
+    points: z.array(z.object({ x: z.number(), y: z.number() })).min(2).describe('路径点数组，至少 2 个点'),
+  }, async ({ points }: { points: Array<{ x: number; y: number }> }) => {
+    const data = await bridge.command('sch_create_bus', { points });
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool('sch_get_all_components', '获取原理图中所有元件列表', {}, async () => {
+    const data = await bridge.command('sch_get_all_components');
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool('sch_get_component_pins', '获取指定元件的所有引脚信息', {
+    primitiveId: z.string().describe('元件图元 ID'),
+  }, async ({ primitiveId }: { primitiveId: string }) => {
+    const data = await bridge.command('sch_get_component_pins', { primitiveId });
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  // ── P1.3: 原理图自动化 ────────────────────────────────────────────────────
+  server.tool('sch_auto_layout', '原理图自动布局', {}, async () => {
+    const data = await bridge.command('sch_auto_layout');
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool('sch_import_changes', '从 PCB 导入变更到原理图', {}, async () => {
+    const data = await bridge.command('sch_import_changes');
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool('sch_export_bom', '导出原理图 BOM（物料清单）', {}, async () => {
+    const data = await bridge.command('sch_export_bom');
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool('sch_export_netlist_file', '导出原理图网表文件', {
+    type: z.string().optional().describe('网表格式（如 kicad、protel 等）'),
+  }, async ({ type }: { type?: string }) => {
+    const params: Record<string, unknown> = {};
+    if (type) params.type = type;
+    const data = await bridge.command('sch_export_netlist_file', params);
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool('sch_get_selected', '获取原理图当前选中的所有图元', {}, async () => {
+    const data = await bridge.command('sch_get_selected');
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool('sch_select_primitives', '选中指定 ID 的原理图图元', {
+    primitiveIds: z.array(z.string()).describe('图元 ID 列表'),
+  }, async ({ primitiveIds }: { primitiveIds: string[] }) => {
+    const data = await bridge.command('sch_select_primitives', { primitiveIds });
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool('sch_clear_selected', '清除原理图中所有选中状态', {}, async () => {
+    const data = await bridge.command('sch_clear_selected');
     return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
   });
 }

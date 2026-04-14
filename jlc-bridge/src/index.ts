@@ -1886,6 +1886,29 @@ function serializeExportResult(result: any, exportType: string): Record<string, 
   return { success: true, exportType, dataType: typeof result, raw: String(result).slice(0, 500) };
 }
 
+/**
+ * Generic serializer for EDA API proxy objects (dmt_Project, dmt_Schematic, etc.)
+ * Extracts getState_* methods and plain properties recursively (depth 2).
+ */
+function serializeResult(obj: any, depth = 0): any {
+  if (obj === null || obj === undefined) return obj;
+  if (typeof obj !== 'object') return obj;
+  if (depth > 2) return '[...]';
+  if (Array.isArray(obj)) return obj.slice(0, 50).map((v: any) => serializeResult(v, depth + 1));
+  const out: Record<string, any> = {};
+  for (const k of getAllKeys(obj)) {
+    try {
+      const v = obj[k];
+      if (typeof v === 'function') {
+        if (k.startsWith('getState_')) out[k.replace('getState_', '')] = v.call(obj);
+      } else {
+        out[k] = depth < 2 ? serializeResult(v, depth + 1) : v;
+      }
+    } catch { /* skip */ }
+  }
+  return out;
+}
+
 async function exploreEdaApi(params: { prefix?: string } = {}): Promise<any> {
   const api = anyEda();
   if (!api) return { error: 'EDA runtime not available' };
@@ -2784,6 +2807,33 @@ async function executeCommand(cmd: BridgeCommand): Promise<BridgeResult> {
         }
         break;
       }
+      case 'sch_modify_props': {
+        const schMod3 = (anyEda() as any)?.sch_PrimitiveComponent;
+        if (!schMod3?.modify) { data = { error: 'modify not available' }; break; }
+        const pid3 = cmd.params.primitiveId;
+        const props3 = cmd.params.properties;
+        if (!pid3 || !props3) { data = { error: 'primitiveId and properties required' }; break; }
+        try {
+          await schMod3.modify(pid3, props3);
+          data = { success: true, primitiveId: pid3, properties: props3 };
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'sch_delete_component': {
+        const schDel = (anyEda() as any)?.sch_PrimitiveComponent;
+        if (!schDel?.delete) { data = { error: 'delete not available' }; break; }
+        const pidDel = cmd.params.primitiveId;
+        if (!pidDel) { data = { error: 'primitiveId required' }; break; }
+        try {
+          await schDel.delete(pidDel);
+          data = { success: true, deleted: pidDel };
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
       case 'pcb_get_layers': {
         const layerApi = (anyEda() as any)?.pcb_Layer;
         try {
@@ -3384,6 +3434,873 @@ async function executeCommand(cmd: BridgeCommand): Promise<BridgeResult> {
         data = results2;
         break;
       }
+      // ── P2.1: PCB 图元补齐 ──────────────────────────────────────────────────
+      case 'pcb_create_arc': {
+        const arcApi = (anyEda() as any)?.pcb_PrimitiveArc;
+        if (!arcApi?.create) { data = { error: 'pcb_PrimitiveArc.create not available' }; break; }
+        const { layer: al, net: an, cx: acx, cy: acy, radius: ar, startAngle: asa, endAngle: aea, width: aw } = cmd.params;
+        try {
+          const r = await arcApi.create(al || 1, an || '', acx || 0, acy || 0, ar || 100, asa || 0, aea || 180, aw || 6);
+          const pid = r?.getState_PrimitiveId?.() || r?.primitiveId || '';
+          data = { success: true, primitiveId: pid };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_create_polyline': {
+        const plApi = (anyEda() as any)?.pcb_PrimitivePolyline;
+        if (!plApi?.create) { data = { error: 'pcb_PrimitivePolyline.create not available' }; break; }
+        const { layer: pll, net: pln, points: plpts, width: plw } = cmd.params;
+        if (!Array.isArray(plpts) || plpts.length < 2) { data = { error: 'points array (min 2) required' }; break; }
+        try {
+          const r = await plApi.create(pll || 1, pln || '', plpts, plw || 6);
+          const pid = r?.getState_PrimitiveId?.() || r?.primitiveId || '';
+          data = { success: true, primitiveId: pid };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_create_dimension': {
+        const dimApi = (anyEda() as any)?.pcb_PrimitiveDimension;
+        if (!dimApi?.create) { data = { error: 'pcb_PrimitiveDimension.create not available' }; break; }
+        const { layer: dl, x1: dx1, y1: dy1, x2: dx2, y2: dy2 } = cmd.params;
+        try {
+          const r = await dimApi.create(dl || 1, dx1 || 0, dy1 || 0, dx2 || 100, dy2 || 0);
+          const pid = r?.getState_PrimitiveId?.() || r?.primitiveId || '';
+          data = { success: true, primitiveId: pid };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_create_fill': {
+        const fillApi = (anyEda() as any)?.pcb_PrimitiveFill;
+        if (!fillApi?.create) { data = { error: 'pcb_PrimitiveFill.create not available' }; break; }
+        const { layer: fll, net: fln, points: flpts } = cmd.params;
+        if (!Array.isArray(flpts) || flpts.length < 3) { data = { error: 'points array (min 3) required' }; break; }
+        try {
+          const r = await fillApi.create(fll || 1, fln || '', flpts);
+          const pid = r?.getState_PrimitiveId?.() || r?.primitiveId || '';
+          data = { success: true, primitiveId: pid };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_create_pad': {
+        const padApi = (anyEda() as any)?.pcb_PrimitivePad;
+        if (!padApi?.create) { data = { error: 'pcb_PrimitivePad.create not available' }; break; }
+        try {
+          const r = await padApi.create(cmd.params);
+          const pid = r?.getState_PrimitiveId?.() || r?.primitiveId || '';
+          data = { success: true, primitiveId: pid };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_modify_pad': {
+        const padApi = (anyEda() as any)?.pcb_PrimitivePad;
+        if (!padApi?.modify) { data = { error: 'pcb_PrimitivePad.modify not available' }; break; }
+        const { primitiveId: mpadId, ...mpadProps } = cmd.params;
+        if (!mpadId) { data = { error: 'primitiveId required' }; break; }
+        try {
+          await padApi.modify(mpadId, mpadProps);
+          data = { success: true, primitiveId: mpadId };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_get_all_arcs': {
+        const arcApi = (anyEda() as any)?.pcb_PrimitiveArc;
+        if (!arcApi?.getAll) { data = { error: 'pcb_PrimitiveArc.getAll not available' }; break; }
+        try {
+          const arcs = await arcApi.getAll();
+          data = { arcs: Array.isArray(arcs) ? arcs.map(serializeResult) : serializeResult(arcs) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_get_adjacent': {
+        const iArcApi = (anyEda() as any)?.ipcb_PrimitiveArc || (anyEda() as any)?.pcb_PrimitiveArc;
+        if (!iArcApi?.getAdjacentPrimitives) { data = { error: 'getAdjacentPrimitives not available' }; break; }
+        const { primitiveId: gadj } = cmd.params;
+        if (!gadj) { data = { error: 'primitiveId required' }; break; }
+        try {
+          const adj = await iArcApi.getAdjacentPrimitives(gadj);
+          data = { adjacent: Array.isArray(adj) ? adj.map(serializeResult) : serializeResult(adj) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_get_entire_track': {
+        const iLineApi = (anyEda() as any)?.ipcb_PrimitiveLine || (anyEda() as any)?.pcb_PrimitiveLine;
+        if (!iLineApi?.getEntireTrack) { data = { error: 'getEntireTrack not available' }; break; }
+        const { primitiveId: getid } = cmd.params;
+        if (!getid) { data = { error: 'primitiveId required' }; break; }
+        try {
+          const track = await iLineApi.getEntireTrack(getid);
+          data = { track: Array.isArray(track) ? track.map(serializeResult) : serializeResult(track) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_convert_fill_to_pour': {
+        const iFillApi = (anyEda() as any)?.ipcb_PrimitiveFill || (anyEda() as any)?.pcb_PrimitiveFill;
+        if (!iFillApi?.convertToPour) { data = { error: 'convertToPour not available' }; break; }
+        const { primitiveId: cfpid } = cmd.params;
+        if (!cfpid) { data = { error: 'primitiveId required' }; break; }
+        try {
+          const r = await iFillApi.convertToPour(cfpid);
+          data = { success: true, result: serializeResult(r) };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+
+      // ── P2.2: 网络管理 ──────────────────────────────────────────────────────
+      case 'pcb_get_net_length': {
+        const netApi = (anyEda() as any)?.pcb_Net;
+        if (!netApi?.getNetLength) { data = { error: 'getNetLength not available' }; break; }
+        const { net: gnlNet } = cmd.params;
+        if (!gnlNet) { data = { error: 'net required' }; break; }
+        try {
+          const length = await netApi.getNetLength(gnlNet);
+          data = { net: gnlNet, length };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_highlight_net': {
+        const netApi = (anyEda() as any)?.pcb_Net;
+        if (!netApi?.highlightNet) { data = { error: 'highlightNet not available' }; break; }
+        const { net: hnNet } = cmd.params;
+        if (!hnNet) { data = { error: 'net required' }; break; }
+        try {
+          await netApi.highlightNet(hnNet);
+          data = { success: true, net: hnNet };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_unhighlight_all': {
+        const netApi = (anyEda() as any)?.pcb_Net;
+        if (!netApi?.unhighlightAllNets) { data = { error: 'unhighlightAllNets not available' }; break; }
+        try {
+          await netApi.unhighlightAllNets();
+          data = { success: true };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_select_net': {
+        const netApi = (anyEda() as any)?.pcb_Net;
+        if (!netApi?.selectNet) { data = { error: 'selectNet not available' }; break; }
+        const { net: snNet } = cmd.params;
+        if (!snNet) { data = { error: 'net required' }; break; }
+        try {
+          await netApi.selectNet(snNet);
+          data = { success: true, net: snNet };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_set_net_color': {
+        const netApi = (anyEda() as any)?.pcb_Net;
+        if (!netApi?.setNetColor) { data = { error: 'setNetColor not available' }; break; }
+        const { net: sncNet, color: sncColor } = cmd.params;
+        if (!sncNet || !sncColor) { data = { error: 'net and color required' }; break; }
+        try {
+          await netApi.setNetColor(sncNet, sncColor);
+          data = { success: true, net: sncNet, color: sncColor };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_get_netlist_data': {
+        const netApi = (anyEda() as any)?.pcb_Net;
+        if (!netApi?.getNetList) { data = { error: 'getNetList not available' }; break; }
+        try {
+          const netlist = await netApi.getNetList();
+          data = { netlist: serializeResult(netlist) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+
+      // ── P2.3: 高级 DRC 与规则管理 ───────────────────────────────────────────
+      case 'pcb_create_net_class': {
+        const drcApi = (anyEda() as any)?.pcb_Drc;
+        if (!drcApi?.createNetClass) { data = { error: 'createNetClass not available' }; break; }
+        const { name: ncName, ...ncProps } = cmd.params;
+        if (!ncName) { data = { error: 'name required' }; break; }
+        try {
+          const r = await drcApi.createNetClass(ncName, ncProps);
+          data = { success: true, result: serializeResult(r) };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_get_all_net_classes': {
+        const drcApi = (anyEda() as any)?.pcb_Drc;
+        if (!drcApi?.getAllNetClasses) { data = { error: 'getAllNetClasses not available' }; break; }
+        try {
+          const classes = await drcApi.getAllNetClasses();
+          data = { classes: Array.isArray(classes) ? classes.map(serializeResult) : serializeResult(classes) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_add_net_to_class': {
+        const drcApi = (anyEda() as any)?.pcb_Drc;
+        if (!drcApi?.addNetToNetClass) { data = { error: 'addNetToNetClass not available' }; break; }
+        const { className: antcClass, net: antcNet } = cmd.params;
+        if (!antcClass || !antcNet) { data = { error: 'className and net required' }; break; }
+        try {
+          await drcApi.addNetToNetClass(antcClass, antcNet);
+          data = { success: true };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_get_rule_configs': {
+        const drcApi = (anyEda() as any)?.pcb_Drc;
+        if (!drcApi?.getAllRuleConfigurations) { data = { error: 'getAllRuleConfigurations not available' }; break; }
+        try {
+          const configs = await drcApi.getAllRuleConfigurations();
+          data = { configs: Array.isArray(configs) ? configs.map(serializeResult) : serializeResult(configs) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_set_rule_config': {
+        const drcApi = (anyEda() as any)?.pcb_Drc;
+        if (!drcApi?.setRuleConfiguration) { data = { error: 'setRuleConfiguration not available' }; break; }
+        try {
+          await drcApi.setRuleConfiguration(cmd.params);
+          data = { success: true };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_export_rules': {
+        const drcApi = (anyEda() as any)?.pcb_Drc;
+        if (!drcApi?.exportRuleConfiguration) { data = { error: 'exportRuleConfiguration not available' }; break; }
+        try {
+          const result = await drcApi.exportRuleConfiguration();
+          data = typeof result === 'string'
+            ? { success: true, content: result, size: result.length }
+            : { success: true, result: serializeResult(result) };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_import_rules': {
+        const drcApi = (anyEda() as any)?.pcb_Drc;
+        if (!drcApi?.importRuleConfiguration) { data = { error: 'importRuleConfiguration not available' }; break; }
+        const { content: ruleContent } = cmd.params;
+        if (!ruleContent) { data = { error: 'content required' }; break; }
+        try {
+          await drcApi.importRuleConfiguration(ruleContent);
+          data = { success: true };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_get_net_rules': {
+        const drcApi = (anyEda() as any)?.pcb_Drc;
+        if (!drcApi?.getNetRules) { data = { error: 'getNetRules not available' }; break; }
+        const { net: gnrNet } = cmd.params;
+        try {
+          const rules = gnrNet ? await drcApi.getNetRules(gnrNet) : await drcApi.getNetRules();
+          data = { rules: serializeResult(rules) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_create_pad_pair_group': {
+        const drcApi = (anyEda() as any)?.pcb_Drc;
+        if (!drcApi?.createPadPairGroup) { data = { error: 'createPadPairGroup not available' }; break; }
+        const { name: ppgName, pairs: ppgPairs } = cmd.params;
+        if (!ppgName || !Array.isArray(ppgPairs)) { data = { error: 'name and pairs array required' }; break; }
+        try {
+          const r = await drcApi.createPadPairGroup(ppgName, ppgPairs);
+          data = { success: true, result: serializeResult(r) };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_get_pad_pair_min_wire': {
+        const drcApi = (anyEda() as any)?.pcb_Drc;
+        if (!drcApi?.getPadPairGroupMinWireLength) { data = { error: 'getPadPairGroupMinWireLength not available' }; break; }
+        const { name: ppmwName } = cmd.params;
+        if (!ppmwName) { data = { error: 'name required' }; break; }
+        try {
+          const length = await drcApi.getPadPairGroupMinWireLength(ppmwName);
+          data = { name: ppmwName, minWireLength: length };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+
+      // ── P2.4: 文档与坐标工具 ────────────────────────────────────────────────
+      case 'pcb_navigate_to': {
+        const docApi = (anyEda() as any)?.pcb_Document;
+        if (!docApi?.navigateToCoordinates) { data = { error: 'navigateToCoordinates not available' }; break; }
+        const { x: navX, y: navY } = cmd.params;
+        try {
+          await docApi.navigateToCoordinates(navX || 0, navY || 0);
+          data = { success: true, x: navX, y: navY };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_navigate_to_region': {
+        const docApi = (anyEda() as any)?.pcb_Document;
+        if (!docApi?.navigateToRegion) { data = { error: 'navigateToRegion not available' }; break; }
+        const { x1: nrx1, y1: nry1, x2: nrx2, y2: nry2 } = cmd.params;
+        try {
+          await docApi.navigateToRegion(nrx1 || 0, nry1 || 0, nrx2 || 1000, nry2 || 1000);
+          data = { success: true };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_zoom_to_outline': {
+        const docApi = (anyEda() as any)?.pcb_Document;
+        if (!docApi?.zoomToBoardOutline) { data = { error: 'zoomToBoardOutline not available' }; break; }
+        try {
+          await docApi.zoomToBoardOutline();
+          data = { success: true };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_canvas_to_data': {
+        const docApi = (anyEda() as any)?.pcb_Document;
+        if (!docApi?.convertCanvasOriginToDataOrigin) { data = { error: 'convertCanvasOriginToDataOrigin not available' }; break; }
+        const { x: cdx, y: cdy } = cmd.params;
+        try {
+          const result = await docApi.convertCanvasOriginToDataOrigin(cdx || 0, cdy || 0);
+          data = { result: serializeResult(result) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'pcb_get_primitives_in_region': {
+        const docApi = (anyEda() as any)?.pcb_Document;
+        if (!docApi?.getPrimitivesInRegion) { data = { error: 'getPrimitivesInRegion not available' }; break; }
+        const { x1: pirx1, y1: piry1, x2: pirx2, y2: piry2, layers: pirLayers } = cmd.params;
+        try {
+          const prims = await docApi.getPrimitivesInRegion(pirx1 || 0, piry1 || 0, pirx2 || 1000, piry2 || 1000, pirLayers);
+          data = { primitives: Array.isArray(prims) ? prims.map(serializeResult) : serializeResult(prims) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+
+      // ── P3.1: 元件库管理 ─────────────────────────────────────────────────
+      case 'lib_search_device': {
+        const libApi = (anyEda() as any)?.lib_Device;
+        if (!libApi?.search) { data = { error: 'lib_Device.search not available' }; break; }
+        const { keyword: lsdKw, limit: lsdLim } = cmd.params;
+        try {
+          const res = await libApi.search(lsdKw || '', lsdLim || 20);
+          data = { results: Array.isArray(res) ? res.map(serializeResult) : serializeResult(res) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'lib_get_device': {
+        const libApi = (anyEda() as any)?.lib_Device;
+        if (!libApi?.get) { data = { error: 'lib_Device.get not available' }; break; }
+        const { uuid: lgdUuid } = cmd.params;
+        if (!lgdUuid) { data = { error: 'uuid required' }; break; }
+        try {
+          const res = await libApi.get(lgdUuid);
+          data = serializeResult(res);
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'lib_get_by_lcsc': {
+        const libApi = (anyEda() as any)?.lib_Device;
+        if (!libApi?.getByLcscIds) { data = { error: 'lib_Device.getByLcscIds not available' }; break; }
+        const { lcscIds } = cmd.params;
+        if (!lcscIds || !Array.isArray(lcscIds)) { data = { error: 'lcscIds array required' }; break; }
+        try {
+          const res = await libApi.getByLcscIds(lcscIds);
+          data = { results: Array.isArray(res) ? res.map(serializeResult) : serializeResult(res) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'lib_search_footprint': {
+        const libApi = (anyEda() as any)?.lib_Footprint;
+        if (!libApi?.search) { data = { error: 'lib_Footprint.search not available' }; break; }
+        const { keyword: lsfKw, limit: lsfLim } = cmd.params;
+        try {
+          const res = await libApi.search(lsfKw || '', lsfLim || 20);
+          data = { results: Array.isArray(res) ? res.map(serializeResult) : serializeResult(res) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'lib_get_footprint': {
+        const libApi = (anyEda() as any)?.lib_Footprint;
+        if (!libApi?.get) { data = { error: 'lib_Footprint.get not available' }; break; }
+        const { uuid: lgfUuid } = cmd.params;
+        if (!lgfUuid) { data = { error: 'uuid required' }; break; }
+        try {
+          const res = await libApi.get(lgfUuid);
+          data = serializeResult(res);
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'lib_render_footprint': {
+        const libApi = (anyEda() as any)?.lib_Footprint;
+        if (!libApi?.getRenderImage) { data = { error: 'lib_Footprint.getRenderImage not available' }; break; }
+        const { uuid: lrfUuid } = cmd.params;
+        if (!lrfUuid) { data = { error: 'uuid required' }; break; }
+        try {
+          const img = await libApi.getRenderImage(lrfUuid);
+          data = serializeExportResult(img);
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'lib_search_symbol': {
+        const libApi = (anyEda() as any)?.lib_Symbol;
+        if (!libApi?.search) { data = { error: 'lib_Symbol.search not available' }; break; }
+        const { keyword: lssKw, limit: lssLim } = cmd.params;
+        try {
+          const res = await libApi.search(lssKw || '', lssLim || 20);
+          data = { results: Array.isArray(res) ? res.map(serializeResult) : serializeResult(res) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'lib_get_symbol': {
+        const libApi = (anyEda() as any)?.lib_Symbol;
+        if (!libApi?.get) { data = { error: 'lib_Symbol.get not available' }; break; }
+        const { uuid: lgsUuid } = cmd.params;
+        if (!lgsUuid) { data = { error: 'uuid required' }; break; }
+        try {
+          const res = await libApi.get(lgsUuid);
+          data = serializeResult(res);
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'lib_render_symbol': {
+        const libApi = (anyEda() as any)?.lib_Symbol;
+        if (!libApi?.getRenderImage) { data = { error: 'lib_Symbol.getRenderImage not available' }; break; }
+        const { uuid: lrsUuid } = cmd.params;
+        if (!lrsUuid) { data = { error: 'uuid required' }; break; }
+        try {
+          const img = await libApi.getRenderImage(lrsUuid);
+          data = serializeExportResult(img);
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'lib_search_3dmodel': {
+        const libApi = (anyEda() as any)?.lib_3DModel;
+        if (!libApi?.search) { data = { error: 'lib_3DModel.search not available' }; break; }
+        const { keyword: ls3Kw, limit: ls3Lim } = cmd.params;
+        try {
+          const res = await libApi.search(ls3Kw || '', ls3Lim || 20);
+          data = { results: Array.isArray(res) ? res.map(serializeResult) : serializeResult(res) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'lib_get_libraries_list': {
+        const libApi = (anyEda() as any)?.lib_LibrariesList;
+        if (!libApi?.getAllLibrariesList) { data = { error: 'lib_LibrariesList.getAllLibrariesList not available' }; break; }
+        try {
+          const res = await libApi.getAllLibrariesList();
+          data = { libraries: Array.isArray(res) ? res.map(serializeResult) : serializeResult(res) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'lib_get_classification': {
+        const libApi = (anyEda() as any)?.lib_Classification;
+        if (!libApi?.getAllClassificationTree) { data = { error: 'lib_Classification.getAllClassificationTree not available' }; break; }
+        try {
+          const res = await libApi.getAllClassificationTree();
+          data = { tree: serializeResult(res) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+
+      // ── P3.2: 编辑器控制 ─────────────────────────────────────────────────
+      case 'editor_zoom_to': {
+        const editorApi = (anyEda() as any)?.dmt_EditorControl;
+        if (!editorApi?.zoomTo) { data = { error: 'dmt_EditorControl.zoomTo not available' }; break; }
+        const { uuid: ezUuid, x: ezX, y: ezY, scale: ezScale } = cmd.params;
+        try {
+          const res = await editorApi.zoomTo(ezUuid, ezX, ezY, ezScale);
+          data = { success: true, result: serializeResult(res) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'editor_zoom_to_selected': {
+        const editorApi = (anyEda() as any)?.dmt_EditorControl;
+        if (!editorApi?.zoomToSelectedPrimitives) { data = { error: 'dmt_EditorControl.zoomToSelectedPrimitives not available' }; break; }
+        try {
+          await editorApi.zoomToSelectedPrimitives();
+          data = { success: true };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'editor_generate_markers': {
+        const editorApi = (anyEda() as any)?.dmt_EditorControl;
+        if (!editorApi?.generateIndicatorMarkers) { data = { error: 'dmt_EditorControl.generateIndicatorMarkers not available' }; break; }
+        const { markers: egMarkers } = cmd.params;
+        try {
+          const res = await editorApi.generateIndicatorMarkers(egMarkers || []);
+          data = { success: true, result: serializeResult(res) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'editor_remove_markers': {
+        const editorApi = (anyEda() as any)?.dmt_EditorControl;
+        if (!editorApi?.removeIndicatorMarkers) { data = { error: 'dmt_EditorControl.removeIndicatorMarkers not available' }; break; }
+        try {
+          await editorApi.removeIndicatorMarkers();
+          data = { success: true };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'editor_get_screenshot': {
+        const editorApi = (anyEda() as any)?.dmt_EditorControl;
+        if (!editorApi?.getCurrentRenderedAreaImage) { data = { error: 'dmt_EditorControl.getCurrentRenderedAreaImage not available' }; break; }
+        const { format: egsFormat } = cmd.params;
+        try {
+          const img = await editorApi.getCurrentRenderedAreaImage(egsFormat || 'png');
+          data = serializeExportResult(img);
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+
+      // ── P3.3: 系统实用工具 ────────────────────────────────────────────────
+      case 'sys_get_environment': {
+        const sysApi = (anyEda() as any)?.sys_Environment;
+        if (!sysApi) { data = { error: 'sys_Environment not available' }; break; }
+        try {
+          const keys = ['getVersion', 'getLanguage', 'getOS', 'getTheme', 'getPlatform'];
+          const env: Record<string, any> = {};
+          for (const k of keys) {
+            if (typeof sysApi[k] === 'function') {
+              try { env[k.replace('get', '').toLowerCase()] = await sysApi[k](); } catch { /* skip */ }
+            }
+          }
+          data = env;
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'sys_unit_convert': {
+        const { value: sucVal, from: sucFrom, to: sucTo } = cmd.params;
+        if (sucVal === undefined || !sucFrom || !sucTo) { data = { error: 'value, from, to required' }; break; }
+        // 先尝试通过 EDA API 换算，失败则本地换算
+        const sysApi = (anyEda() as any)?.sys_Unit;
+        try {
+          if (sysApi) {
+            const methodMap: Record<string, string> = {
+              'mil->mm': 'milToMm', 'mm->mil': 'mmToMil',
+              'mil->inch': 'milToInch', 'inch->mil': 'inchToMil',
+              'mm->inch': 'mmToInch', 'inch->mm': 'inchToMm',
+            };
+            const methodName = methodMap[`${sucFrom}->${sucTo}`];
+            if (methodName && typeof sysApi[methodName] === 'function') {
+              const result = await sysApi[methodName](sucVal);
+              data = { input: sucVal, from: sucFrom, to: sucTo, result };
+              break;
+            }
+          }
+          // 本地换算 fallback
+          const toMil = (v: number, unit: string): number => {
+            if (unit === 'mil') return v;
+            if (unit === 'mm') return v / 0.0254;
+            if (unit === 'inch') return v * 1000;
+            return v;
+          };
+          const fromMil = (v: number, unit: string): number => {
+            if (unit === 'mil') return v;
+            if (unit === 'mm') return v * 0.0254;
+            if (unit === 'inch') return v / 1000;
+            return v;
+          };
+          const result = fromMil(toMil(sucVal, sucFrom), sucTo);
+          data = { input: sucVal, from: sucFrom, to: sucTo, result };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'sys_show_toast': {
+        const sysApi = (anyEda() as any)?.sys_Message;
+        if (!sysApi?.showToastMessage) { data = { error: 'sys_Message.showToastMessage not available' }; break; }
+        const { message: stMsg, type: stType, duration: stDur } = cmd.params;
+        try {
+          await sysApi.showToastMessage(stMsg || '', stType || 'info', stDur || 3000);
+          data = { success: true };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'sys_file_save': {
+        const sysApi = (anyEda() as any)?.sys_FileSystem;
+        if (!sysApi?.saveFileToFileSystem) { data = { error: 'sys_FileSystem.saveFileToFileSystem not available' }; break; }
+        const { filename: sfsName, content: sfsContent, encoding: sfsEnc } = cmd.params;
+        if (!sfsName || sfsContent === undefined) { data = { error: 'filename and content required' }; break; }
+        try {
+          const res = await sysApi.saveFileToFileSystem(sfsName, sfsContent, sfsEnc || 'utf-8');
+          data = { success: true, result: serializeResult(res) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'sys_file_read': {
+        const sysApi = (anyEda() as any)?.sys_FileSystem;
+        if (!sysApi?.readFileFromFileSystem) { data = { error: 'sys_FileSystem.readFileFromFileSystem not available' }; break; }
+        const { filename: sfrName, encoding: sfrEnc } = cmd.params;
+        if (!sfrName) { data = { error: 'filename required' }; break; }
+        try {
+          const content = await sysApi.readFileFromFileSystem(sfrName, sfrEnc || 'utf-8');
+          data = { filename: sfrName, content };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'sys_import_project': {
+        const sysApi = (anyEda() as any)?.sys_FileManager;
+        if (!sysApi?.importProjectByProjectFile) { data = { error: 'sys_FileManager.importProjectByProjectFile not available' }; break; }
+        const { filePath: sipPath } = cmd.params;
+        if (!sipPath) { data = { error: 'filePath required' }; break; }
+        try {
+          const res = await sysApi.importProjectByProjectFile(sipPath);
+          data = serializeResult(res);
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+
+      // ── P1.1: 项目与文档管理 ────────────────────────────────────────────────
+      case 'dmt_project_get_info': {
+        const projApi = (anyEda() as any)?.dmt_Project;
+        if (!projApi?.getCurrentProjectInfo) { data = { error: 'getCurrentProjectInfo not available' }; break; }
+        try {
+          const info = await projApi.getCurrentProjectInfo();
+          data = serializeResult(info);
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'dmt_project_get_all': {
+        const projApi = (anyEda() as any)?.dmt_Project;
+        if (!projApi?.getAllProjectsUuid) { data = { error: 'getAllProjectsUuid not available' }; break; }
+        try {
+          const list = await projApi.getAllProjectsUuid();
+          data = { projects: Array.isArray(list) ? list.map(serializeResult) : serializeResult(list) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'dmt_project_create': {
+        const projApi = (anyEda() as any)?.dmt_Project;
+        if (!projApi?.createProject) { data = { error: 'createProject not available' }; break; }
+        const { name: pName, description: pDesc } = cmd.params;
+        if (!pName) { data = { error: 'name required' }; break; }
+        try {
+          const result = await projApi.createProject(pName, pDesc || '');
+          data = serializeResult(result);
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'dmt_project_open': {
+        const projApi = (anyEda() as any)?.dmt_Project;
+        if (!projApi?.openProject) { data = { error: 'openProject not available' }; break; }
+        const { uuid: projUuid } = cmd.params;
+        if (!projUuid) { data = { error: 'uuid required' }; break; }
+        try {
+          await projApi.openProject(projUuid);
+          data = { success: true, uuid: projUuid };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'dmt_schematic_get_all': {
+        const schApi = (anyEda() as any)?.dmt_Schematic;
+        if (!schApi?.getAllSchematicsInfo) { data = { error: 'getAllSchematicsInfo not available' }; break; }
+        try {
+          const list = await schApi.getAllSchematicsInfo();
+          data = { schematics: Array.isArray(list) ? list.map(serializeResult) : serializeResult(list) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'dmt_schematic_create_page': {
+        const schApi = (anyEda() as any)?.dmt_Schematic;
+        if (!schApi?.createSchematicPage) { data = { error: 'createSchematicPage not available' }; break; }
+        const { schematicUuid: sUuid, name: spName } = cmd.params;
+        if (!sUuid) { data = { error: 'schematicUuid required' }; break; }
+        try {
+          const result = await schApi.createSchematicPage(sUuid, spName || 'Sheet1');
+          data = serializeResult(result);
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'dmt_schematic_get_pages': {
+        const schApi = (anyEda() as any)?.dmt_Schematic;
+        if (!schApi?.getAllSchematicPagesInfo) { data = { error: 'getAllSchematicPagesInfo not available' }; break; }
+        const { schematicUuid: sUuid2 } = cmd.params;
+        try {
+          const pages = sUuid2
+            ? await schApi.getAllSchematicPagesInfo(sUuid2)
+            : await schApi.getAllSchematicPagesInfo?.();
+          data = { pages: Array.isArray(pages) ? pages.map(serializeResult) : serializeResult(pages) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'dmt_board_get_all': {
+        const boardApi = (anyEda() as any)?.dmt_Board;
+        if (!boardApi?.getAllBoardsInfo) { data = { error: 'getAllBoardsInfo not available' }; break; }
+        try {
+          const list = await boardApi.getAllBoardsInfo();
+          data = { boards: Array.isArray(list) ? list.map(serializeResult) : serializeResult(list) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+
+      // ── P1.2: 原理图图元完整覆盖 ───────────────────────────────────────────
+      case 'sch_create_net_flag': {
+        const sc = (anyEda() as any)?.sch_PrimitiveComponent;
+        if (!sc?.createNetFlag) { data = { error: 'createNetFlag not available' }; break; }
+        const { x: nfx, y: nfy, name: nfName, rotation: nfRot } = cmd.params;
+        try {
+          const r = await sc.createNetFlag(nfName || 'GND', nfx || 0, nfy || 0, nfRot || 0);
+          const pid = r?.getState_PrimitiveId?.() || r?.primitiveId || '';
+          data = { success: true, primitiveId: pid };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'sch_create_net_port': {
+        const sc = (anyEda() as any)?.sch_PrimitiveComponent;
+        if (!sc?.createNetPort) { data = { error: 'createNetPort not available' }; break; }
+        const { x: npx, y: npy, name: npName, rotation: npRot } = cmd.params;
+        try {
+          const r = await sc.createNetPort(npName || 'PORT', npx || 0, npy || 0, npRot || 0);
+          const pid = r?.getState_PrimitiveId?.() || r?.primitiveId || '';
+          data = { success: true, primitiveId: pid };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'sch_create_rectangle': {
+        const rectApi = (anyEda() as any)?.sch_PrimitiveRectangle;
+        if (!rectApi?.create) { data = { error: 'sch_PrimitiveRectangle.create not available' }; break; }
+        const { x1: rx1, y1: ry1, x2: rx2, y2: ry2 } = cmd.params;
+        try {
+          const r = await rectApi.create(rx1 || 0, ry1 || 0, rx2 || 100, ry2 || 100);
+          const pid = r?.getState_PrimitiveId?.() || r?.primitiveId || '';
+          data = { success: true, primitiveId: pid };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'sch_create_text': {
+        const txtApi = (anyEda() as any)?.sch_PrimitiveText;
+        if (!txtApi?.create) { data = { error: 'sch_PrimitiveText.create not available' }; break; }
+        const { x: stx, y: sty, text: stText, fontSize: stFs, rotation: stRot } = cmd.params;
+        try {
+          const r = await txtApi.create(stText || '', stx || 0, sty || 0, stRot || 0, stFs || 14);
+          const pid = r?.getState_PrimitiveId?.() || r?.primitiveId || '';
+          data = { success: true, primitiveId: pid };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'sch_create_circle': {
+        const circApi = (anyEda() as any)?.sch_PrimitiveCircle;
+        if (!circApi?.create) { data = { error: 'sch_PrimitiveCircle.create not available' }; break; }
+        const { x: cx, y: cy, radius: cr } = cmd.params;
+        try {
+          const r = await circApi.create(cx || 0, cy || 0, cr || 50);
+          const pid = r?.getState_PrimitiveId?.() || r?.primitiveId || '';
+          data = { success: true, primitiveId: pid };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'sch_create_polygon': {
+        const polyApi = (anyEda() as any)?.sch_PrimitivePolygon;
+        if (!polyApi?.create) { data = { error: 'sch_PrimitivePolygon.create not available' }; break; }
+        const { points: polyPts } = cmd.params;
+        if (!Array.isArray(polyPts) || polyPts.length < 3) { data = { error: 'points array (min 3) required' }; break; }
+        try {
+          const r = await polyApi.create(polyPts);
+          const pid = r?.getState_PrimitiveId?.() || r?.primitiveId || '';
+          data = { success: true, primitiveId: pid };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'sch_create_arc': {
+        const arcApi = (anyEda() as any)?.sch_PrimitiveArc;
+        if (!arcApi?.create) { data = { error: 'sch_PrimitiveArc.create not available' }; break; }
+        const { cx: acx, cy: acy, radius: ar, startAngle, endAngle } = cmd.params;
+        try {
+          const r = await arcApi.create(acx || 0, acy || 0, ar || 50, startAngle || 0, endAngle || 180);
+          const pid = r?.getState_PrimitiveId?.() || r?.primitiveId || '';
+          data = { success: true, primitiveId: pid };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'sch_create_bus': {
+        const busApi = (anyEda() as any)?.sch_PrimitiveBus;
+        if (!busApi?.create) { data = { error: 'sch_PrimitiveBus.create not available' }; break; }
+        const { points: busPts } = cmd.params;
+        if (!Array.isArray(busPts) || busPts.length < 2) { data = { error: 'points array (min 2) required' }; break; }
+        try {
+          const r = await busApi.create(busPts);
+          const pid = r?.getState_PrimitiveId?.() || r?.primitiveId || '';
+          data = { success: true, primitiveId: pid };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'sch_get_all_components': {
+        const sc = (anyEda() as any)?.sch_PrimitiveComponent;
+        if (!sc?.getAll) { data = { error: 'sch_PrimitiveComponent.getAll not available' }; break; }
+        try {
+          const list = await sc.getAll();
+          data = { components: Array.isArray(list) ? list.map(serializeResult) : serializeResult(list) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'sch_get_component_pins': {
+        const sc = (anyEda() as any)?.sch_PrimitiveComponent;
+        if (!sc?.getAllPinsByPrimitiveId) { data = { error: 'getAllPinsByPrimitiveId not available' }; break; }
+        const { primitiveId: cpid } = cmd.params;
+        if (!cpid) { data = { error: 'primitiveId required' }; break; }
+        try {
+          const pins = await sc.getAllPinsByPrimitiveId(cpid);
+          data = { pins: Array.isArray(pins) ? pins.map(serializeResult) : serializeResult(pins) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+
+      // ── P1.3: 原理图自动化 ──────────────────────────────────────────────────
+      case 'sch_auto_layout': {
+        const docApi = (anyEda() as any)?.sch_Document;
+        if (!docApi?.autoLayout) { data = { error: 'sch_Document.autoLayout not available' }; break; }
+        try {
+          await docApi.autoLayout();
+          data = { success: true };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'sch_import_changes': {
+        const docApi = (anyEda() as any)?.sch_Document;
+        if (!docApi?.importChanges) { data = { error: 'sch_Document.importChanges not available' }; break; }
+        try {
+          await docApi.importChanges();
+          data = { success: true };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'sch_export_bom': {
+        const mfgApi = (anyEda() as any)?.sch_ManufactureData;
+        if (!mfgApi?.getBomFile) { data = { error: 'sch_ManufactureData.getBomFile not available' }; break; }
+        try {
+          const result = await mfgApi.getBomFile();
+          data = serializeExportResult(result, 'sch_bom');
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'sch_export_netlist_file': {
+        const mfgApi = (anyEda() as any)?.sch_ManufactureData;
+        if (!mfgApi?.getNetlistFile) { data = { error: 'sch_ManufactureData.getNetlistFile not available' }; break; }
+        const { type: nlType } = cmd.params;
+        try {
+          const result = await mfgApi.getNetlistFile(nlType);
+          data = serializeExportResult(result, 'sch_netlist');
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'sch_get_selected': {
+        const selApi = (anyEda() as any)?.sch_SelectControl;
+        if (!selApi?.getAllSelectedPrimitives) { data = { error: 'getAllSelectedPrimitives not available' }; break; }
+        try {
+          const selected = await selApi.getAllSelectedPrimitives();
+          data = { selected: Array.isArray(selected) ? selected.map(serializeResult) : serializeResult(selected) };
+        } catch (e) { data = { error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'sch_select_primitives': {
+        const selApi = (anyEda() as any)?.sch_SelectControl;
+        if (!selApi?.doSelectPrimitives) { data = { error: 'doSelectPrimitives not available' }; break; }
+        const { primitiveIds: spids } = cmd.params;
+        if (!Array.isArray(spids)) { data = { error: 'primitiveIds array required' }; break; }
+        try {
+          await selApi.doSelectPrimitives(spids);
+          data = { success: true, count: spids.length };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+      case 'sch_clear_selected': {
+        const selApi = (anyEda() as any)?.sch_SelectControl;
+        if (!selApi?.clearSelected) { data = { error: 'clearSelected not available' }; break; }
+        try {
+          await selApi.clearSelected();
+          data = { success: true };
+        } catch (e) { data = { success: false, error: e instanceof Error ? e.message : String(e) }; }
+        break;
+      }
+
       default:
         throw new Error(`unknown action: ${cmd.action}`);
     }

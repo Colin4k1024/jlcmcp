@@ -470,6 +470,430 @@ function buildToolRegistry(bridge: BridgeClient): AgentTool[] {
       execute: async (p) => bridge.command('lib_device_lookup', p),
     },
 
+    // --- P1.1: 项目与文档管理 ---
+    simple('project_get_info', 'dmt_project_get_info', '获取当前工程信息'),
+    simple('project_get_all', 'dmt_project_get_all', '获取所有工程 UUID 列表'),
+    {
+      name: 'project_create', description: '创建新工程',
+      input_schema: {
+        type: 'object', properties: {
+          name: { type: 'string', description: '工程名称' },
+          description: { type: 'string', description: '工程描述（可选）' },
+        }, required: ['name'],
+      },
+      execute: async (p) => bridge.command('dmt_project_create', p),
+    },
+    {
+      name: 'project_open', description: '打开指定工程',
+      input_schema: {
+        type: 'object', properties: {
+          uuid: { type: 'string', description: '工程 UUID' },
+        }, required: ['uuid'],
+      },
+      execute: async (p) => bridge.command('dmt_project_open', p),
+    },
+    simple('schematic_get_all', 'dmt_schematic_get_all', '获取所有原理图信息'),
+    {
+      name: 'schematic_create_page', description: '在原理图中创建新页面',
+      input_schema: {
+        type: 'object', properties: {
+          schematicUuid: { type: 'string', description: '原理图 UUID' },
+          name: { type: 'string', description: '页面名称' },
+        }, required: ['schematicUuid'],
+      },
+      execute: async (p) => bridge.command('dmt_schematic_create_page', p),
+    },
+    {
+      name: 'schematic_get_pages', description: '获取原理图所有页面',
+      input_schema: {
+        type: 'object', properties: {
+          schematicUuid: { type: 'string', description: '原理图 UUID（可选）' },
+        }, required: [],
+      },
+      execute: async (p) => bridge.command('dmt_schematic_get_pages', p),
+    },
+    simple('board_get_all', 'dmt_board_get_all', '获取所有 PCB 板信息'),
+
+    // --- P1.2: 原理图图元 ---
+    {
+      name: 'sch_create_net_flag', description: '在原理图中创建网络标志（如 GND）',
+      input_schema: {
+        type: 'object', properties: {
+          name: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' },
+          rotation: { type: 'number' },
+        }, required: ['name', 'x', 'y'],
+      },
+      execute: async (p) => bridge.command('sch_create_net_flag', p),
+    },
+    {
+      name: 'sch_create_rectangle', description: '在原理图中绘制矩形',
+      input_schema: {
+        type: 'object', properties: {
+          x1: { type: 'number' }, y1: { type: 'number' },
+          x2: { type: 'number' }, y2: { type: 'number' },
+        }, required: ['x1', 'y1', 'x2', 'y2'],
+      },
+      execute: async (p) => bridge.command('sch_create_rectangle', p),
+    },
+    {
+      name: 'sch_create_text', description: '在原理图中添加文字标注',
+      input_schema: {
+        type: 'object', properties: {
+          text: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' },
+          fontSize: { type: 'number' }, rotation: { type: 'number' },
+        }, required: ['text', 'x', 'y'],
+      },
+      execute: async (p) => bridge.command('sch_create_text', p),
+    },
+    {
+      name: 'sch_create_bus', description: '在原理图中绘制总线',
+      input_schema: {
+        type: 'object', properties: {
+          points: { type: 'array', items: { type: 'object' }, description: '路径点数组' },
+        }, required: ['points'],
+      },
+      execute: async (p) => bridge.command('sch_create_bus', p),
+    },
+    simple('sch_get_all_components', 'sch_get_all_components', '获取原理图中所有元件'),
+    {
+      name: 'sch_get_component_pins', description: '获取指定元件的所有引脚',
+      input_schema: {
+        type: 'object', properties: {
+          primitiveId: { type: 'string', description: '元件图元 ID' },
+        }, required: ['primitiveId'],
+      },
+      execute: async (p) => bridge.command('sch_get_component_pins', p),
+    },
+
+    // --- P1.3: 原理图自动化 ---
+    simple('sch_auto_layout', 'sch_auto_layout', '原理图自动布局'),
+    simple('sch_import_changes', 'sch_import_changes', '从 PCB 导入变更到原理图'),
+    simple('sch_export_bom', 'sch_export_bom', '导出原理图 BOM'),
+    {
+      name: 'sch_export_netlist_file', description: '导出原理图网表文件',
+      input_schema: {
+        type: 'object', properties: {
+          type: { type: 'string', description: '网表格式（可选）' },
+        }, required: [],
+      },
+      execute: async (p) => bridge.command('sch_export_netlist_file', p),
+    },
+    simple('sch_get_selected', 'sch_get_selected', '获取原理图当前选中图元'),
+    {
+      name: 'sch_select_primitives', description: '选中指定原理图图元',
+      input_schema: {
+        type: 'object', properties: {
+          primitiveIds: { type: 'array', items: { type: 'string' } },
+        }, required: ['primitiveIds'],
+      },
+      execute: async (p) => bridge.command('sch_select_primitives', p),
+    },
+    simple('sch_clear_selected', 'sch_clear_selected', '清除原理图所有选中状态'),
+
+    // --- P2.1: PCB 图元 ---
+    {
+      name: 'pcb_create_arc', description: '在 PCB 上绘制弧线',
+      input_schema: {
+        type: 'object', properties: {
+          layer: { type: 'number' }, cx: { type: 'number' }, cy: { type: 'number' },
+          radius: { type: 'number' }, startAngle: { type: 'number' }, endAngle: { type: 'number' },
+          width: { type: 'number' }, net: { type: 'string' },
+        }, required: ['layer', 'cx', 'cy', 'radius', 'startAngle', 'endAngle'],
+      },
+      execute: async (p) => bridge.command('pcb_create_arc', p),
+    },
+    {
+      name: 'pcb_create_polyline', description: '在 PCB 上绘制折线',
+      input_schema: {
+        type: 'object', properties: {
+          layer: { type: 'number' },
+          points: { type: 'array', items: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } } },
+          width: { type: 'number' }, net: { type: 'string' },
+        }, required: ['layer', 'points'],
+      },
+      execute: async (p) => bridge.command('pcb_create_polyline', p),
+    },
+    {
+      name: 'pcb_create_pad', description: '在 PCB 上创建独立焊盘',
+      input_schema: {
+        type: 'object', properties: {
+          layer: { type: 'number' }, x: { type: 'number' }, y: { type: 'number' },
+          width: { type: 'number' }, height: { type: 'number' }, shape: { type: 'string' },
+          drill: { type: 'number' }, net: { type: 'string' },
+        }, required: ['layer', 'x', 'y'],
+      },
+      execute: async (p) => bridge.command('pcb_create_pad', p),
+    },
+    {
+      name: 'pcb_modify_pad', description: '修改焊盘属性',
+      input_schema: {
+        type: 'object', properties: {
+          primitiveId: { type: 'string' }, net: { type: 'string' },
+          width: { type: 'number' }, height: { type: 'number' }, shape: { type: 'string' },
+        }, required: ['primitiveId'],
+      },
+      execute: async (p) => bridge.command('pcb_modify_pad', p),
+    },
+    simple('pcb_get_all_arcs', 'pcb_get_all_arcs', '获取 PCB 中所有弧线图元'),
+    {
+      name: 'pcb_get_adjacent', description: '获取与指定图元相邻的图元',
+      input_schema: {
+        type: 'object', properties: {
+          primitiveId: { type: 'string' },
+        }, required: ['primitiveId'],
+      },
+      execute: async (p) => bridge.command('pcb_get_adjacent', p),
+    },
+    {
+      name: 'pcb_get_entire_track', description: '获取与指定走线段相连的整条走线',
+      input_schema: {
+        type: 'object', properties: {
+          primitiveId: { type: 'string' },
+        }, required: ['primitiveId'],
+      },
+      execute: async (p) => bridge.command('pcb_get_entire_track', p),
+    },
+
+    // --- P2.2: 网络管理 ---
+    {
+      name: 'pcb_get_net_length', description: '查询指定网络的总走线长度',
+      input_schema: {
+        type: 'object', properties: {
+          net: { type: 'string', description: '网络名称' },
+        }, required: ['net'],
+      },
+      execute: async (p) => bridge.command('pcb_get_net_length', p),
+    },
+    {
+      name: 'pcb_highlight_net', description: '高亮显示指定网络',
+      input_schema: {
+        type: 'object', properties: {
+          net: { type: 'string' },
+        }, required: ['net'],
+      },
+      execute: async (p) => bridge.command('pcb_highlight_net', p),
+    },
+    simple('pcb_unhighlight_all', 'pcb_unhighlight_all', '取消所有网络的高亮'),
+    {
+      name: 'pcb_select_net', description: '选中指定网络的所有图元',
+      input_schema: {
+        type: 'object', properties: {
+          net: { type: 'string' },
+        }, required: ['net'],
+      },
+      execute: async (p) => bridge.command('pcb_select_net', p),
+    },
+    simple('pcb_get_netlist_data', 'pcb_get_netlist_data', '获取 PCB 完整网表数据（元件-引脚-网络映射）'),
+
+    // --- P2.3: 高级 DRC 规则 ---
+    {
+      name: 'pcb_create_net_class', description: '创建网络类（定义一组网络的走线规则）',
+      input_schema: {
+        type: 'object', properties: {
+          name: { type: 'string' }, clearance: { type: 'number' },
+          traceWidth: { type: 'number' }, viaSize: { type: 'number' }, viaDrill: { type: 'number' },
+        }, required: ['name'],
+      },
+      execute: async (p) => bridge.command('pcb_create_net_class', p),
+    },
+    simple('pcb_get_all_net_classes', 'pcb_get_all_net_classes', '获取所有网络类定义'),
+    {
+      name: 'pcb_add_net_to_class', description: '将网络加入指定网络类',
+      input_schema: {
+        type: 'object', properties: {
+          className: { type: 'string' }, net: { type: 'string' },
+        }, required: ['className', 'net'],
+      },
+      execute: async (p) => bridge.command('pcb_add_net_to_class', p),
+    },
+    simple('pcb_get_rule_configs', 'pcb_get_rule_configs', '获取所有 DRC 规则配置'),
+    {
+      name: 'pcb_set_rule_config', description: '设置 DRC 规则配置',
+      input_schema: {
+        type: 'object', properties: {
+          ruleType: { type: 'string' }, value: { type: 'number' }, netClass: { type: 'string' },
+        }, required: ['ruleType', 'value'],
+      },
+      execute: async (p) => bridge.command('pcb_set_rule_config', p),
+    },
+    {
+      name: 'pcb_get_net_rules', description: '查询指定网络适用的 DRC 规则',
+      input_schema: {
+        type: 'object', properties: {
+          net: { type: 'string', description: '网络名称（不填则查全局默认规则）' },
+        }, required: [],
+      },
+      execute: async (p) => bridge.command('pcb_get_net_rules', p),
+    },
+
+    // --- P2.4: 文档与坐标 ---
+    {
+      name: 'pcb_navigate_to', description: '导航到 PCB 指定坐标（居中显示）',
+      input_schema: {
+        type: 'object', properties: {
+          x: { type: 'number' }, y: { type: 'number' }, zoom: { type: 'number' },
+        }, required: ['x', 'y'],
+      },
+      execute: async (p) => bridge.command('pcb_navigate_to', p),
+    },
+    {
+      name: 'pcb_navigate_to_region', description: '导航到 PCB 指定矩形区域（自适应缩放）',
+      input_schema: {
+        type: 'object', properties: {
+          x1: { type: 'number' }, y1: { type: 'number' },
+          x2: { type: 'number' }, y2: { type: 'number' },
+        }, required: ['x1', 'y1', 'x2', 'y2'],
+      },
+      execute: async (p) => bridge.command('pcb_navigate_to_region', p),
+    },
+    simple('pcb_zoom_to_outline', 'pcb_zoom_to_outline', '缩放至显示整个 PCB 板框'),
+    {
+      name: 'pcb_get_primitives_in_region', description: '获取指定矩形区域内的所有图元',
+      input_schema: {
+        type: 'object', properties: {
+          x1: { type: 'number' }, y1: { type: 'number' },
+          x2: { type: 'number' }, y2: { type: 'number' },
+          layer: { type: 'number' },
+        }, required: ['x1', 'y1', 'x2', 'y2'],
+      },
+      execute: async (p) => bridge.command('pcb_get_primitives_in_region', p),
+    },
+
+    // --- P3.1: 元件库管理 ---
+    {
+      name: 'lib_search_device', description: '搜索器件库（含封装/符号/3D模型）',
+      input_schema: {
+        type: 'object', properties: {
+          keyword: { type: 'string', description: '搜索关键词' },
+          limit: { type: 'number', description: '返回数量上限，默认 20' },
+        }, required: ['keyword'],
+      },
+      execute: async (p) => bridge.command('lib_search_device', p),
+    },
+    {
+      name: 'lib_get_device', description: '通过 UUID 获取器件详情',
+      input_schema: {
+        type: 'object', properties: {
+          uuid: { type: 'string' },
+        }, required: ['uuid'],
+      },
+      execute: async (p) => bridge.command('lib_get_device', p),
+    },
+    {
+      name: 'lib_get_by_lcsc', description: '通过 LCSC 编号批量获取器件信息（含封装/符号）',
+      input_schema: {
+        type: 'object', properties: {
+          lcscIds: { type: 'array', items: { type: 'string' }, description: 'LCSC 编号列表' },
+        }, required: ['lcscIds'],
+      },
+      execute: async (p) => bridge.command('lib_get_by_lcsc', p),
+    },
+    {
+      name: 'lib_search_footprint', description: '搜索封装库',
+      input_schema: {
+        type: 'object', properties: {
+          keyword: { type: 'string' }, limit: { type: 'number' },
+        }, required: ['keyword'],
+      },
+      execute: async (p) => bridge.command('lib_search_footprint', p),
+    },
+    {
+      name: 'lib_search_symbol', description: '搜索原理图符号库',
+      input_schema: {
+        type: 'object', properties: {
+          keyword: { type: 'string' }, limit: { type: 'number' },
+        }, required: ['keyword'],
+      },
+      execute: async (p) => bridge.command('lib_search_symbol', p),
+    },
+    {
+      name: 'lib_search_3dmodel', description: '搜索 3D 模型库',
+      input_schema: {
+        type: 'object', properties: {
+          keyword: { type: 'string' }, limit: { type: 'number' },
+        }, required: ['keyword'],
+      },
+      execute: async (p) => bridge.command('lib_search_3dmodel', p),
+    },
+    simple('lib_get_libraries_list', 'lib_get_libraries_list', '获取所有可用器件库列表'),
+    simple('lib_get_classification', 'lib_get_classification', '获取器件分类树'),
+
+    // --- P3.2: 编辑器控制 ---
+    {
+      name: 'editor_zoom_to', description: '缩放到指定坐标或图元',
+      input_schema: {
+        type: 'object', properties: {
+          uuid: { type: 'string', description: '图元 UUID（可选）' },
+          x: { type: 'number' }, y: { type: 'number' }, scale: { type: 'number' },
+        }, required: [],
+      },
+      execute: async (p) => bridge.command('editor_zoom_to', p),
+    },
+    simple('editor_zoom_to_selected', 'editor_zoom_to_selected', '缩放到当前选中图元的边界框'),
+    {
+      name: 'editor_generate_markers', description: '在指定位置生成可视化标记',
+      input_schema: {
+        type: 'object', properties: {
+          markers: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { x: { type: 'number' }, y: { type: 'number' }, label: { type: 'string' }, color: { type: 'string' } },
+            },
+          },
+        }, required: ['markers'],
+      },
+      execute: async (p) => bridge.command('editor_generate_markers', p),
+    },
+    simple('editor_remove_markers', 'editor_remove_markers', '移除所有可视化标记'),
+    simple('editor_get_screenshot', 'editor_get_screenshot', '获取当前编辑器可见区域截图'),
+
+    // --- P3.3: 系统工具 ---
+    simple('sys_get_environment', 'sys_get_environment', '获取 EDA 环境信息（版本、语言、OS 等）'),
+    {
+      name: 'sys_unit_convert', description: '单位换算（mil ↔ mm ↔ inch）',
+      input_schema: {
+        type: 'object', properties: {
+          value: { type: 'number', description: '待换算数值' },
+          from: { type: 'string', enum: ['mil', 'mm', 'inch'], description: '源单位' },
+          to: { type: 'string', enum: ['mil', 'mm', 'inch'], description: '目标单位' },
+        }, required: ['value', 'from', 'to'],
+      },
+      execute: async (p) => bridge.command('sys_unit_convert', p),
+    },
+    {
+      name: 'sys_show_toast', description: '在 EDA 编辑器中显示提示消息',
+      input_schema: {
+        type: 'object', properties: {
+          message: { type: 'string' },
+          type: { type: 'string', enum: ['info', 'success', 'warning', 'error'] },
+          duration: { type: 'number', description: '显示时长（毫秒）' },
+        }, required: ['message'],
+      },
+      execute: async (p) => bridge.command('sys_show_toast', p),
+    },
+    {
+      name: 'sys_file_save', description: '将内容保存到本地文件系统',
+      input_schema: {
+        type: 'object', properties: {
+          filename: { type: 'string', description: '文件名（含扩展名）' },
+          content: { type: 'string', description: '文件内容' },
+          encoding: { type: 'string', description: '编码（默认 utf-8）' },
+        }, required: ['filename', 'content'],
+      },
+      execute: async (p) => bridge.command('sys_file_save', p),
+    },
+    {
+      name: 'sys_file_read', description: '从本地文件系统读取文件',
+      input_schema: {
+        type: 'object', properties: {
+          filename: { type: 'string', description: '文件路径或文件名' },
+          encoding: { type: 'string', description: '编码（默认 utf-8）' },
+        }, required: ['filename'],
+      },
+      execute: async (p) => bridge.command('sys_file_read', p),
+    },
+
     // --- 计算工具（纯数学，不走 bridge）---
     {
       name: 'calc_impedance', description: '计算走线阻抗或根据目标阻抗反算线宽',
