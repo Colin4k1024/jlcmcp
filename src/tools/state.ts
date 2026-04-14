@@ -61,4 +61,29 @@ export function registerStateTools(server: any, bridge: BridgeClient) {
     const data = await bridge.command('ping');
     return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
   });
+
+  // ── P0.1: 已有 bridge 动作的 MCP 工具注册 ─────────────────────────────────
+
+  server.tool('pcb_add_text', '在 PCB 上添加文字', {
+    text: z.string().describe('文字内容'),
+    x: z.number().optional().describe('X 坐标（mil），默认 0'),
+    y: z.number().optional().describe('Y 坐标（mil），默认 0'),
+    layer: z.number().optional().describe('层号（3=顶层丝印），默认 3'),
+    fontSize: z.number().optional().describe('字号（mil），默认 40'),
+    rotation: z.number().optional().describe('旋转角度，默认 0'),
+  }, async (params: any) => {
+    const data = await bridge.command('pcb_add_text', params);
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool('pcb_get_layers', '获取 PCB 所有图层信息', {}, async () => {
+    const data = await bridge.command('pcb_get_layers');
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool('pcb_coord_convert', 'PCB 坐标系调试（获取画布/数据原点转换关系）', {}, async () => {
+    const data = await bridge.command('pcb_coord_debug');
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
 }

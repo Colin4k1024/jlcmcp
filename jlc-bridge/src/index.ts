@@ -2,13 +2,14 @@ import * as extensionConfig from '../extension.json';
 
 const APP_NAME = String((extensionConfig as any).displayName || 'JLC Bridge');
 const APP_VERSION = String((extensionConfig as any).version || '0.0.0');
-const BRIDGE_DIR = 'C:\\Users\\0\\.openclaw\\workspace\\jlc-bridge';
-const COMMAND_FILE = `${BRIDGE_DIR}\\command.json`;
-const RESULT_FILE = `${BRIDGE_DIR}\\result.json`;
-const LOG_FILE = `${BRIDGE_DIR}\\bridge.log`;
+const BRIDGE_DIR = '/tmp/jlc-bridge';
+const COMMAND_FILE = `${BRIDGE_DIR}/command.json`;
+const RESULT_FILE = `${BRIDGE_DIR}/result.json`;
+const LOG_FILE = `${BRIDGE_DIR}/bridge.log`;
 const POLL_INTERVAL_MS = 500;
 const ENABLED_STORAGE_KEY = 'jlcBridgeEnabled';
 const TIMER_ID = 'jlc_bridge_poll_loop';
+const HTTP_BASE = 'http://127.0.0.1:18800';
 
 let bridgeEnabled = false;
 let nativeIntervalHandle: ReturnType<typeof setInterval> | null = null;
@@ -1342,7 +1343,7 @@ async function createVia(params: {
   const y = toFinite(params?.y, NaN);
   if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error('x/y are required');
 
-  const holeDiameter = Math.max(1, toFinite(params?.holeDiameter, 10));
+  const holeDiameter = Math.max(1, toFinite(params?.holeDiameter ?? (params as any)?.drill, 10));
   const diameter = Math.max(holeDiameter + 1, toFinite(params?.diameter, 22));
   const viaType = Number.isFinite(Number(params?.viaType)) ? Number(params.viaType) : undefined;
   const primitiveLock = params?.primitiveLock !== undefined ? Boolean(params.primitiveLock) : false;
@@ -1765,8 +1766,35 @@ async function runSchDrc(params: { strict?: boolean }): Promise<any> {
     throw new Error('current EDA does not support sch_Drc.check');
   }
   const strict = params?.strict !== false;
-  const result = await api.sch_Drc.check(strict, false);
-  return { passed: Boolean(result) };
+  // Second param true = show results panel in EDA UI
+  const result = await api.sch_Drc.check(strict, true);
+
+  // Try to extract detailed DRC results
+  const serialize = (obj: any, depth = 0): any => {
+    if (depth > 3 || !obj) return obj;
+    if (typeof obj !== 'object') return obj;
+    if (Array.isArray(obj)) return obj.map((v: any) => serialize(v, depth + 1));
+    const out: Record<string, any> = {};
+    for (const k of getAllKeys(obj)) {
+      try {
+        const v = obj[k];
+        if (typeof v === 'function' && k.startsWith('getState_')) {
+          out[k.replace('getState_', '')] = serialize(v.call(obj), depth + 1);
+        } else if (typeof v !== 'function') {
+          out[k] = serialize(v, depth + 1);
+        }
+      } catch {}
+    }
+    return out;
+  };
+
+  if (result && typeof result === 'object') {
+    return { passed: false, details: serialize(result) };
+  }
+  if (Array.isArray(result)) {
+    return { passed: result.length === 0, errors: result.map((r: any) => serialize(r)), count: result.length };
+  }
+  return { passed: Boolean(result), raw: typeof result, rawStr: String(result).slice(0, 500) };
 }
 
 async function createPcbComponent(params: {
@@ -1791,6 +1819,397 @@ async function createPcbComponent(params: {
   const primitiveId = result?.getState_PrimitiveId?.() || result?.primitiveId || '';
   const designator = result?.getState_Designator?.() || result?.designator || '';
   return { primitiveId, designator };
+}
+
+/** Explore EDA API surface — lists top-level keys and their method counts */
+/** Collect all method/property names from an object including prototype chain */
+function getAllKeys(obj: any): string[] {
+  const seen = new Set<string>();
+  let cur = obj;
+  while (cur && cur !== Object.prototype) {
+    for (const k of [...Object.getOwnPropertyNames(cur), ...Object.keys(cur)]) {
+      seen.add(k);
+    }
+    cur = Object.getPrototypeOf(cur);
+  }
+  return [...seen].filter(k => k !== 'constructor');
+}
+
+/**
+ * Serialize export result from pcb_ManufactureData methods.
+ * These may return Blob, string, ArrayBuffer, or trigger file dialogs.
+ */
+function serializeExportResult(result: any, exportType: string): Record<string, any> {
+  if (result === undefined || result === null) {
+    return { success: true, exportType, note: 'Export triggered (may open file dialog in EDA)' };
+  }
+  if (typeof result === 'string') {
+    // Text-based export (netlist, DSN, etc.)
+    return {
+      success: true,
+      exportType,
+      dataType: 'text',
+      size: result.length,
+      preview: result.slice(0, 2000),
+      truncated: result.length > 2000,
+    };
+  }
+  if (result instanceof ArrayBuffer || (result?.byteLength !== undefined)) {
+    return {
+      success: true,
+      exportType,
+      dataType: 'binary',
+      size: result.byteLength || 0,
+      note: 'Binary data exported',
+    };
+  }
+  // Blob or other object
+  if (typeof result === 'object') {
+    const out: Record<string, any> = {
+      success: true,
+      exportType,
+      dataType: typeof result,
+    };
+    // Try to extract useful info
+    if (result.size !== undefined) out.size = result.size;
+    if (result.type !== undefined) out.mimeType = result.type;
+    if (result.name !== undefined) out.fileName = result.name;
+    // Serialize top-level properties
+    for (const k of Object.keys(result).slice(0, 20)) {
+      try {
+        const v = result[k];
+        if (typeof v !== 'function' && typeof v !== 'object') out[k] = v;
+      } catch { /* skip */ }
+    }
+    return out;
+  }
+  return { success: true, exportType, dataType: typeof result, raw: String(result).slice(0, 500) };
+}
+
+async function exploreEdaApi(params: { prefix?: string } = {}): Promise<any> {
+  const api = anyEda();
+  if (!api) return { error: 'EDA runtime not available' };
+
+  const prefix = params?.prefix || '';
+
+  if (!prefix) {
+    // Root level: list all top-level API keys
+    const keys: Record<string, string[]> = {};
+    const topKeys = getAllKeys(api);
+    for (const key of topKeys) {
+      const val = (api as any)[key];
+      if (val && typeof val === 'object') {
+        const methods = getAllKeys(val).filter(k => typeof (val as any)[k] === 'function');
+        keys[key] = methods;
+      } else if (typeof val === 'function') {
+        keys[`fn:${key}`] = [];
+      }
+    }
+    return { prefix: 'root', keys };
+  }
+
+  // Specific API object
+  const target = (api as any)[prefix];
+  if (target === undefined) {
+    return { error: `No API object at prefix: ${prefix}` };
+  }
+  if (typeof target === 'function') {
+    return { prefix, type: 'function', value: String(target).slice(0, 200) };
+  }
+  if (typeof target !== 'object' || target === null) {
+    return { prefix, type: typeof target, value: target };
+  }
+
+  const methods = getAllKeys(target).filter(k => typeof (target as any)[k] === 'function');
+  const props = getAllKeys(target).filter(k => typeof (target as any)[k] !== 'function');
+  const propValues: Record<string, any> = {};
+  for (const p of props.slice(0, 30)) {
+    try { propValues[p] = (target as any)[p]; } catch { propValues[p] = '<error>'; }
+  }
+
+  return { prefix, methods, props: propValues };
+}
+
+/** Search component library by LCSC number — tries multiple EDA API variants */
+async function schSearchLibrary(params: { lcsc: string }): Promise<any> {
+  const api = anyEda();
+  const lcsc = params?.lcsc;
+  if (!lcsc) throw new Error('lcsc parameter required');
+
+  // Try lib_Device.getByLcscIds first (confirmed available in JLC EDA Pro)
+  try {
+    const libDevice = (api as any)?.lib_Device;
+    if (libDevice?.getByLcscIds) {
+      const results = await libDevice.getByLcscIds([lcsc]);
+      if (results && results.length > 0) {
+        const dev = results[0];
+        // Extract libraryUuid and uuid from various possible shapes
+        const libraryUuid = dev.libraryUuid || dev.library_uuid || dev.getState_LibraryUuid?.();
+        const uuid = dev.uuid || dev.componentUuid || dev.getState_Uuid?.();
+        const name = dev.name || dev.title || dev.getState_Title?.() || '';
+        if (libraryUuid && uuid) {
+          return { lcsc, found: true, libraryUuid, uuid, name, raw: dev, method: 'lib_Device.getByLcscIds' };
+        }
+        return { lcsc, found: true, raw: dev, method: 'lib_Device.getByLcscIds' };
+      }
+    }
+  } catch (e) { /* fall through */ }
+
+  // Try various EDA library search APIs
+  const candidates: Array<[string, () => Promise<any>]> = [
+    ['dmt_Library.getComponentByLcscNo', async () => (api as any)?.dmt_Library?.getComponentByLcscNo?.(lcsc)],
+    ['dmt_Library.searchByLcsc', async () => (api as any)?.dmt_Library?.searchByLcsc?.(lcsc)],
+    ['dmt_Library.getComponentByNo', async () => (api as any)?.dmt_Library?.getComponentByNo?.(lcsc)],
+    ['dmt_Library.searchComponents', async () => (api as any)?.dmt_Library?.searchComponents?.({ lcsc })],
+    ['dmt_Datasource.getComponentByLcsc', async () => (api as any)?.dmt_Datasource?.getComponentByLcsc?.(lcsc)],
+    ['dmt_LibraryService.searchByLcsc', async () => (api as any)?.dmt_LibraryService?.searchByLcsc?.(lcsc)],
+    ['lcsc_Library.getByNo', async () => (api as any)?.lcsc_Library?.getByNo?.(lcsc)],
+    ['sys_Http.post:component/search', async () => {
+      const http = (api as any)?.sys_Http;
+      if (!http?.post) return undefined;
+      return http.post('/api/editor/component/search', { lcscNo: lcsc });
+    }],
+  ];
+
+  const results: Record<string, any> = {};
+  for (const [name, fn] of candidates) {
+    try {
+      const r = await fn();
+      if (r !== undefined && r !== null) {
+        results[name] = r;
+      } else {
+        results[name] = 'returned null/undefined';
+      }
+    } catch (e) {
+      results[name] = `error: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+  return { lcsc, found: false, results };
+}
+
+/** Race a create call against a timeout — returns result or throws on timeout */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`${label}: ${ms}ms timeout`)), ms)),
+  ]);
+}
+
+/** Create a schematic component — tries multiple EDA API variants */
+async function schCreateComponent(params: {
+  lcsc?: string;
+  libraryUuid?: string;
+  componentUuid?: string;
+  x: number;
+  y: number;
+  rotation?: number;
+}): Promise<any> {
+  const api = anyEda();
+  const { lcsc, libraryUuid, componentUuid, x, y, rotation = 0 } = params;
+  const schComp = (api as any)?.sch_PrimitiveComponent;
+  if (!schComp?.create) {
+    return { success: false, error: 'sch_PrimitiveComponent.create not available' };
+  }
+
+  // Resolve UUIDs: either from params or via LCSC lookup
+  let lUuid = libraryUuid;
+  let cUuid = componentUuid;
+  if ((!lUuid || !cUuid) && lcsc) {
+    const libDevice = (api as any)?.lib_Device;
+    if (libDevice?.getByLcscIds) {
+      const devices = await libDevice.getByLcscIds([lcsc]);
+      if (devices && devices.length > 0) {
+        const dev = devices[0];
+        lUuid = dev.libraryUuid || dev.library_uuid;
+        cUuid = dev.uuid || dev.componentUuid;
+      }
+    }
+    if (!lUuid || !cUuid) {
+      return { success: false, error: `Could not resolve UUIDs for LCSC ${lcsc}` };
+    }
+  }
+  if (!lUuid || !cUuid) {
+    return { success: false, error: 'libraryUuid and componentUuid (or lcsc) required' };
+  }
+
+  // Get current schematic page UUID for args that need it
+  let pageUuid = '';
+  try {
+    const pageInfo = await (api as any)?.dmt_Schematic?.getCurrentSchematicPageInfo?.();
+    pageUuid = pageInfo?.uuid || '';
+  } catch { /* ignore */ }
+
+  // Try multiple arg signatures with 6s timeout each (prevent UI-blocking hangs)
+  const componentObj = { libraryUuid: lUuid, uuid: cUuid };
+  const argSets: Array<{ label: string; args: any[] }> = [
+    { label: '(comp,x,y,rot,false)', args: [componentObj, x, y, rotation, false] },
+    { label: '(comp,x,y,rot)', args: [componentObj, x, y, rotation] },
+  ];
+  if (pageUuid) {
+    argSets.push(
+      { label: '(comp,page,x,y,rot,false)', args: [componentObj, pageUuid, x, y, rotation, false] },
+      { label: '(comp,page,x,y,rot)', args: [componentObj, pageUuid, x, y, rotation] },
+    );
+  }
+
+  const errors: Record<string, string> = {};
+  for (const { label, args } of argSets) {
+    try {
+      log(`trying schComp.create${label}`);
+      const result = await withTimeout(schComp.create(...args), 6000, label);
+      const id = result?.getState_PrimitiveId?.() || result?.primitiveId || '';
+      log(`schComp.create${label} succeeded: ${id}`);
+      return { success: true, primitiveId: id, libraryUuid: lUuid, componentUuid: cUuid, method: label, pageUuid };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      errors[label] = msg;
+      log(`schComp.create${label} failed: ${msg}`);
+    }
+  }
+
+  return { success: false, error: 'All create signatures failed', attempts: errors, libraryUuid: lUuid, componentUuid: cUuid, pageUuid };
+}
+
+/** Create a schematic wire — supports 2-point or polyline (L-shape routing) */
+async function schCreateWire(params: {
+  x1?: number; y1?: number; x2?: number; y2?: number;
+  points?: number[];  // flat array [x1,y1,x2,y2,...] for polyline
+}): Promise<any> {
+  const api = anyEda();
+  const schWire = (api as any)?.sch_PrimitiveWire;
+  if (!schWire?.create) {
+    return { success: false, error: 'sch_PrimitiveWire.create not available' };
+  }
+
+  // Build line array: either from points param or x1/y1/x2/y2
+  let line: number[];
+  if (params.points && params.points.length >= 4) {
+    line = params.points;
+  } else {
+    const { x1, y1, x2, y2 } = params;
+    line = [x1!, y1!, x2!, y2!];
+  }
+
+  // Ensure even number of elements (pairs of x,y)
+  if (line.length % 2 !== 0) line.pop();
+
+  // If only 2 points, duplicate last point to make 4 points (EDA expects >= 4 points = 8 numbers)
+  if (line.length === 4) {
+    line = [line[0], line[1], line[2], line[3], line[2], line[3], line[2], line[3]];
+  }
+
+  // Create empty wire shell
+  let wireId = '';
+  try {
+    const result = await withTimeout(schWire.create({ line: [0,0,0,0] }), 5000, 'create');
+    wireId = result?.getState_PrimitiveId?.() || result?.primitiveId || '';
+  } catch { /* ignore */ }
+  if (!wireId) {
+    return { success: false, error: 'wire create failed' };
+  }
+
+  // Modify with actual line data
+  try {
+    await schWire.modify(wireId, { line });
+  } catch { /* best effort */ }
+
+  return { success: true, primitiveId: wireId };
+}
+
+/** Create a net label in the schematic */
+async function schCreateNetLabel(params: {
+  x: number; y: number; name: string; rotation?: number;
+}): Promise<any> {
+  const api = anyEda();
+  const { x, y, name, rotation = 0 } = params;
+
+  // Primary: sch_PrimitiveAttribute.createNetLabel (confirmed in JLC EDA Pro API surface)
+  const schAttr = (api as any)?.sch_PrimitiveAttribute;
+  if (schAttr?.createNetLabel) {
+    const result = await schAttr.createNetLabel(name, x, y, rotation);
+    const id = result?.getState_PrimitiveId?.() || result?.primitiveId || '';
+    return { success: true, primitiveId: id, method: 'sch_PrimitiveAttribute.createNetLabel' };
+  }
+
+  // Fallback: sch_PrimitiveNetLabel.create
+  const schLabel = (api as any)?.sch_PrimitiveNetLabel;
+  if (schLabel?.create) {
+    const result = await schLabel.create(name, x, y, rotation);
+    const id = result?.getState_PrimitiveId?.() || result?.primitiveId || '';
+    return { success: true, primitiveId: id, method: 'sch_PrimitiveNetLabel' };
+  }
+
+  // Try alternative: sch_PrimitiveNet
+  const schNet = (api as any)?.sch_PrimitiveNet;
+  if (schNet?.create) {
+    const result = await schNet.create(name, x, y, rotation);
+    const id = result?.getState_PrimitiveId?.() || result?.primitiveId || '';
+    return { success: true, primitiveId: id, method: 'sch_PrimitiveNet' };
+  }
+
+  return { success: false, error: 'No net label API found',
+           available: {
+             sch_PrimitiveAttribute_createNetLabel: Boolean(schAttr?.createNetLabel),
+             sch_PrimitiveNetLabel: Boolean(schLabel),
+             sch_PrimitiveNet: Boolean(schNet),
+           } };
+}
+
+/** Create a power port (VCC/GND symbol) in the schematic */
+async function schCreatePowerPort(params: {
+  x: number; y: number; name: string; rotation?: number;
+}): Promise<any> {
+  const api = anyEda();
+  const { x, y, name, rotation = 0 } = params;
+  const schComp = (api as any)?.sch_PrimitiveComponent;
+
+  // Determine flag type from name
+  const nameLower = name.toLowerCase();
+  const isGround = nameLower.includes('gnd') || nameLower === 'vss' || nameLower === 'ground';
+
+  // Try createNetFlag with 6s timeout (various arg signatures)
+  if (schComp?.createNetFlag) {
+    const argSets: Array<{ label: string; args: any[] }> = [
+      { label: 'createNetFlag(name,x,y,rot)', args: [name, x, y, rotation] },
+      { label: 'createNetFlag(name,{x,y},rot)', args: [name, { x, y }, rotation] },
+      { label: 'createNetFlag({name,x,y,rot})', args: [{ name, x, y, rotation }] },
+    ];
+
+    const errors: Record<string, string> = {};
+    for (const { label, args } of argSets) {
+      try {
+        log(`trying schComp.${label}`);
+        const result = await withTimeout(schComp.createNetFlag(...args), 6000, label);
+        const id = result?.getState_PrimitiveId?.() || result?.primitiveId || '';
+        return { success: true, primitiveId: id, method: label };
+      } catch (e) {
+        errors[label] = e instanceof Error ? e.message : String(e);
+      }
+    }
+
+    // If createNetFlag failed, fall back to net label as workaround
+    log('createNetFlag failed, falling back to net label for power symbol');
+    const schAttr = (api as any)?.sch_PrimitiveAttribute;
+    if (schAttr?.createNetLabel) {
+      try {
+        const result = await schAttr.createNetLabel(name, x, y, rotation);
+        const id = result?.getState_PrimitiveId?.() || result?.primitiveId || '';
+        return { success: true, primitiveId: id, method: 'netLabel-fallback', note: 'Used net label instead of power symbol', createNetFlagErrors: errors };
+      } catch { /* fall through */ }
+    }
+
+    return { success: false, error: 'createNetFlag and netLabel fallback both failed', attempts: errors };
+  }
+
+  // Use net label as last resort
+  const schAttr = (api as any)?.sch_PrimitiveAttribute;
+  if (schAttr?.createNetLabel) {
+    const result = await schAttr.createNetLabel(name, x, y, rotation);
+    const id = result?.getState_PrimitiveId?.() || result?.primitiveId || '';
+    return { success: true, primitiveId: id, method: 'netLabel-only', note: 'createNetFlag not available, used net label' };
+  }
+
+  return { success: false, error: 'No power port or net label API found' };
 }
 
 async function getFeatureSupport(): Promise<any> {
@@ -2294,6 +2713,677 @@ async function executeCommand(cmd: BridgeCommand): Promise<BridgeResult> {
       case 'create_pcb_component':
         data = await createPcbComponent(cmd.params);
         break;
+      case 'explore_eda_api':
+        data = await exploreEdaApi(cmd.params);
+        break;
+      case 'sch_search_library':
+        data = await schSearchLibrary(cmd.params);
+        break;
+      case 'sch_create_component':
+        data = await schCreateComponent(cmd.params);
+        break;
+      case 'sch_create_wire':
+        data = await schCreateWire(cmd.params);
+        break;
+      case 'sch_create_net_label':
+        data = await schCreateNetLabel(cmd.params);
+        break;
+      case 'sch_create_power_port':
+        data = await schCreatePowerPort(cmd.params);
+        break;
+      case 'pcb_add_text': {
+        const strApi = (anyEda() as any)?.pcb_PrimitiveString;
+        if (!strApi?.create) { data = { error: 'API not available' }; break; }
+        const { text: txt, x: tx, y: ty, layer: tl, fontSize: tfs, rotation: tr } = cmd.params;
+        if (!txt) { data = { error: 'text required' }; break; }
+        try {
+          const result = await strApi.create(
+            tl || 3,      // layer (3=top silk)
+            tx || 0,       // x
+            ty || 0,       // y
+            tr || 0,       // rotation
+            txt,           // text content
+            tfs || 40,     // font size in mil
+            undefined,     // font
+            undefined,     // bold
+            undefined,     // italic
+            false          // locked
+          );
+          const pid = result?.getState_PrimitiveId?.() || result?.primitiveId || '';
+          data = { success: true, primitiveId: pid };
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'sch_set_title_block': {
+        const schApi = (anyEda() as any)?.dmt_Schematic;
+        if (!schApi?.modifySchematicPageTitleBlock) { data = { error: 'API not available' }; break; }
+        const pageUuid = cmd.params.pageUuid;
+        const fields = cmd.params.fields;  // { Company: "xxx", Drawed: "xxx", ... }
+        if (!pageUuid || !fields) { data = { error: 'pageUuid and fields required' }; break; }
+        try {
+          await schApi.modifySchematicPageTitleBlock(pageUuid, fields);
+          data = { success: true };
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'sch_set_designator': {
+        const schMod = (anyEda() as any)?.sch_PrimitiveComponent;
+        if (!schMod?.modify) { data = { error: 'modify not available' }; break; }
+        const pid2 = cmd.params.primitiveId;
+        const desig2 = cmd.params.designator;
+        if (!pid2 || !desig2) { data = { error: 'primitiveId and designator required' }; break; }
+        try {
+          await schMod.modify(pid2, { designator: desig2 });
+          data = { success: true, primitiveId: pid2, designator: desig2 };
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'pcb_get_layers': {
+        const layerApi = (anyEda() as any)?.pcb_Layer;
+        try {
+          const layers = await layerApi?.getAllLayers?.();
+          if (Array.isArray(layers)) {
+            data = layers.map((l: any) => {
+              const out: Record<string, any> = {};
+              for (const k of getAllKeys(l)) {
+                try {
+                  const v = l[k];
+                  if (typeof v === 'function' && k.startsWith('getState_')) {
+                    out[k.replace('getState_', '')] = v.call(l);
+                  } else if (typeof v !== 'function') {
+                    out[k] = v;
+                  }
+                } catch {}
+              }
+              return out;
+            });
+          } else {
+            data = { error: 'getAllLayers returned non-array', raw: String(layers) };
+          }
+        } catch (e) { data = { error: String(e) }; }
+        break;
+      }
+      case 'pcb_set_layer_count': {
+        const layerApi2 = (anyEda() as any)?.pcb_Layer;
+        if (!layerApi2?.setTheNumberOfCopperLayers) {
+          data = { error: 'setTheNumberOfCopperLayers not available' }; break;
+        }
+        try {
+          await layerApi2.setTheNumberOfCopperLayers(cmd.params.count);
+          data = { success: true, count: cmd.params.count };
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'pcb_add_custom_layer': {
+        const layerApi3 = (anyEda() as any)?.pcb_Layer;
+        if (!layerApi3?.addCustomLayer) {
+          data = { error: 'addCustomLayer not available' }; break;
+        }
+        try {
+          const result = await layerApi3.addCustomLayer(cmd.params.name, cmd.params.layerType);
+          data = { success: true, result: result ?? null };
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'pcb_set_layer_visible': {
+        const layerApi4 = (anyEda() as any)?.pcb_Layer;
+        const lid = cmd.params.layerId;
+        const vis = cmd.params.visible;
+        try {
+          if (vis) {
+            if (!layerApi4?.setLayerVisible) { data = { error: 'setLayerVisible not available' }; break; }
+            await layerApi4.setLayerVisible(lid);
+          } else {
+            if (!layerApi4?.setLayerInvisible) { data = { error: 'setLayerInvisible not available' }; break; }
+            await layerApi4.setLayerInvisible(lid);
+          }
+          data = { success: true, layerId: lid, visible: vis };
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'pcb_lock_layer': {
+        const layerApi5 = (anyEda() as any)?.pcb_Layer;
+        const lid5 = cmd.params.layerId;
+        const locked5 = cmd.params.locked;
+        try {
+          if (locked5) {
+            if (!layerApi5?.lockLayer) { data = { error: 'lockLayer not available' }; break; }
+            await layerApi5.lockLayer(lid5);
+          } else {
+            if (!layerApi5?.unlockLayer) { data = { error: 'unlockLayer not available' }; break; }
+            await layerApi5.unlockLayer(lid5);
+          }
+          data = { success: true, layerId: lid5, locked: locked5 };
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'pcb_set_pcb_type': {
+        const layerApi6 = (anyEda() as any)?.pcb_Layer;
+        if (!layerApi6?.setPcbType) {
+          data = { error: 'setPcbType not available' }; break;
+        }
+        try {
+          await layerApi6.setPcbType(cmd.params.pcbType);
+          data = { success: true, pcbType: cmd.params.pcbType };
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'pcb_get_all_nets': {
+        const netApi = (anyEda() as any)?.pcb_Net;
+        if (!netApi?.getAllNetName) {
+          data = { error: 'getAllNetName not available' }; break;
+        }
+        try {
+          const nets = await netApi.getAllNetName();
+          data = { nets: Array.isArray(nets) ? nets : [], count: Array.isArray(nets) ? nets.length : 0 };
+        } catch (e) {
+          data = { error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      // ── P0.2: 制造数据导出 ──────────────────────────────────────────────────
+      case 'pcb_export_gerber': {
+        const mfgApi = (anyEda() as any)?.pcb_ManufactureData;
+        if (!mfgApi?.getGerberFile) { data = { error: 'getGerberFile not available' }; break; }
+        try {
+          const result = await mfgApi.getGerberFile();
+          data = serializeExportResult(result, 'gerber');
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'pcb_export_bom': {
+        const mfgApi = (anyEda() as any)?.pcb_ManufactureData;
+        if (!mfgApi?.getBomFile) { data = { error: 'getBomFile not available' }; break; }
+        try {
+          const result = await mfgApi.getBomFile();
+          data = serializeExportResult(result, 'bom');
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'pcb_export_pick_place': {
+        const mfgApi = (anyEda() as any)?.pcb_ManufactureData;
+        if (!mfgApi?.getPickAndPlaceFile) { data = { error: 'getPickAndPlaceFile not available' }; break; }
+        try {
+          const result = await mfgApi.getPickAndPlaceFile();
+          data = serializeExportResult(result, 'pick_place');
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'pcb_export_3d': {
+        const mfgApi = (anyEda() as any)?.pcb_ManufactureData;
+        if (!mfgApi?.get3DFile) { data = { error: 'get3DFile not available' }; break; }
+        try {
+          const result = await mfgApi.get3DFile();
+          data = serializeExportResult(result, '3d');
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'pcb_export_pdf': {
+        const mfgApi = (anyEda() as any)?.pcb_ManufactureData;
+        if (!mfgApi?.getPdfFile) { data = { error: 'getPdfFile not available' }; break; }
+        try {
+          const result = await mfgApi.getPdfFile();
+          data = serializeExportResult(result, 'pdf');
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'pcb_export_dxf': {
+        const mfgApi = (anyEda() as any)?.pcb_ManufactureData;
+        if (!mfgApi?.getDxfFile) { data = { error: 'getDxfFile not available' }; break; }
+        try {
+          const result = await mfgApi.getDxfFile();
+          data = serializeExportResult(result, 'dxf');
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'pcb_export_dsn': {
+        const mfgApi = (anyEda() as any)?.pcb_ManufactureData;
+        if (!mfgApi?.getDsnFile) { data = { error: 'getDsnFile not available' }; break; }
+        try {
+          const result = await mfgApi.getDsnFile();
+          data = serializeExportResult(result, 'dsn');
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'pcb_export_ipc356': {
+        const mfgApi = (anyEda() as any)?.pcb_ManufactureData;
+        if (!mfgApi?.getIpcD356AFile) { data = { error: 'getIpcD356AFile not available' }; break; }
+        try {
+          const result = await mfgApi.getIpcD356AFile();
+          data = serializeExportResult(result, 'ipc356');
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'pcb_export_odb': {
+        const mfgApi = (anyEda() as any)?.pcb_ManufactureData;
+        if (!mfgApi?.getOpenDatabaseDoublePlusFile) { data = { error: 'getODB++ not available' }; break; }
+        try {
+          const result = await mfgApi.getOpenDatabaseDoublePlusFile();
+          data = serializeExportResult(result, 'odb');
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'pcb_export_netlist': {
+        const mfgApi = (anyEda() as any)?.pcb_ManufactureData;
+        if (!mfgApi?.getNetlistFile) { data = { error: 'getNetlistFile not available' }; break; }
+        try {
+          const result = await mfgApi.getNetlistFile();
+          data = serializeExportResult(result, 'netlist');
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'pcb_get_manufacture_data': {
+        const mfgApi = (anyEda() as any)?.pcb_ManufactureData;
+        if (!mfgApi) { data = { error: 'pcb_ManufactureData not available' }; break; }
+        // Probe available export methods
+        const available: Record<string, boolean> = {};
+        const methods = [
+          'getGerberFile', 'getBomFile', 'getPickAndPlaceFile', 'get3DFile',
+          'getPdfFile', 'getDxfFile', 'getDsnFile', 'getIpcD356AFile',
+          'getOpenDatabaseDoublePlusFile', 'getNetlistFile', 'getManufactureData',
+          'get3DShellFile', 'place3DShellOrder',
+        ];
+        for (const m of methods) {
+          available[m] = typeof mfgApi[m] === 'function';
+        }
+        try {
+          const mfgData = mfgApi.getManufactureData ? await mfgApi.getManufactureData() : null;
+          data = { available, manufactureData: mfgData };
+        } catch (e) {
+          data = { available, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'pcb_3d_shell': {
+        const mfg = (anyEda() as any)?.pcb_ManufactureData;
+        const results10: Record<string, any> = {};
+        const serialize10 = (obj: any, depth = 0): any => {
+          if (depth > 2 || !obj) return obj;
+          if (typeof obj !== 'object') return obj;
+          if (typeof obj === 'string') return obj.slice(0, 500);
+          if (Array.isArray(obj)) return obj.slice(0, 5).map((v: any) => serialize10(v, depth + 1));
+          const out: Record<string, any> = {};
+          for (const k of Object.keys(obj).slice(0, 20)) {
+            try { out[k] = serialize10(obj[k], depth + 1); } catch { out[k] = '?'; }
+          }
+          return out;
+        };
+
+        // Call get3DShellFile with detailed capture
+        try {
+          log('calling get3DShellFile...');
+          const shellResult = await mfg.get3DShellFile();
+          results10.get3DShellFile = serialize10(shellResult);
+          results10.shellType = typeof shellResult;
+          if (typeof shellResult === 'string') results10.shellPreview = shellResult.slice(0, 200);
+        } catch (e) {
+          results10.get3DShellFile = `error: ${e instanceof Error ? e.message : String(e)}`;
+        }
+
+        // Call get3DFile
+        try {
+          const file3d = await mfg.get3DFile();
+          results10.get3DFile = serialize10(file3d);
+          results10.file3dType = typeof file3d;
+          if (typeof file3d === 'string') results10.file3dPreview = file3d.slice(0, 200);
+        } catch (e) {
+          results10.get3DFile = `error: ${e instanceof Error ? e.message : String(e)}`;
+        }
+
+        results10.available = {
+          get3DShellFile: Boolean(mfg?.get3DShellFile),
+          get3DFile: Boolean(mfg?.get3DFile),
+          place3DShellOrder: Boolean(mfg?.place3DShellOrder),
+        };
+        data = results10;
+        break;
+      }
+      case 'pcb_coord_debug': {
+        const pcbDoc = (anyEda() as any)?.pcb_Document;
+        const results9: Record<string, any> = {};
+        try { results9.canvasOrigin = await pcbDoc?.getCanvasOrigin?.(); } catch (e) { results9.canvasOrigin = String(e); }
+        try { results9.dataToCanvas = await pcbDoc?.convertDataOriginToCanvasOrigin?.(0, 0); } catch (e) { results9.dataToCanvas = String(e); }
+        try { results9.canvasToData = await pcbDoc?.convertCanvasOriginToDataOrigin?.(0, 0); } catch (e) { results9.canvasToData = String(e); }
+        try { await pcbDoc?.zoomToBoardOutline?.(); results9.zoomToBoardOutline = 'ok'; } catch (e) { results9.zoomToBoardOutline = String(e); }
+        data = results9;
+        break;
+      }
+      case 'sch_set_netlist': {
+        const api7 = anyEda() as any;
+        if (!api7?.sch_Netlist?.setNetlist) {
+          data = { error: 'setNetlist not available' }; break;
+        }
+        const netlistData = cmd.params.netlist;
+        try {
+          await api7.sch_Netlist.setNetlist(netlistData);
+          data = { success: true };
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'sch_auto_route': {
+        const api8 = anyEda() as any;
+        if (!api8?.sch_Document?.autoRouting) {
+          data = { error: 'autoRouting not available' }; break;
+        }
+        try {
+          const result8 = await api8.sch_Document.autoRouting();
+          data = { success: true, result: result8 };
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'sch_save': {
+        const api9 = anyEda() as any;
+        try {
+          await api9?.sch_Document?.save?.();
+          data = { success: true };
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'sch_delete_all_wires': {
+        const swDel = (anyEda() as any)?.sch_PrimitiveWire;
+        if (!swDel?.delete || !swDel?.getAllPrimitiveId) {
+          data = { error: 'delete API not available' }; break;
+        }
+        const delIds = await swDel.getAllPrimitiveId();
+        let deleted = 0;
+        if (Array.isArray(delIds)) {
+          for (const wid of delIds) {
+            try { await swDel.delete(wid); deleted++; } catch {}
+          }
+        }
+        data = { deleted, total: Array.isArray(delIds) ? delIds.length : 0 };
+        break;
+      }
+      case 'sch_wire_probe': {
+        const api6 = anyEda() as any;
+        const sw = api6?.sch_PrimitiveWire;
+        const sd2 = api6?.sch_Document;
+        const sp = api6?.sch_Primitive;
+        const results6: Record<string, any> = {};
+
+        // Try getAllPrimitiveId
+        try {
+          const ids = await sw?.getAllPrimitiveId?.();
+          results6.wireIds = ids;
+        } catch (e) { results6.wireIds = `error: ${e}`; }
+
+        // Try getAll with various params
+        try {
+          const all1 = await sw?.getAll?.();
+          results6.getAll_noArgs = Array.isArray(all1) ? all1.length : all1;
+        } catch (e) { results6.getAll_noArgs = `error: ${e}`; }
+
+        try {
+          const all2 = await sw?.getAll?.(undefined, true);
+          results6.getAll_undefinedTrue = Array.isArray(all2) ? all2.length : all2;
+        } catch (e) { results6.getAll_undefinedTrue = `error: ${e}`; }
+
+        // Try getPrimitivesInRegion for the whole sheet
+        try {
+          const region = await sd2?.getPrimitivesInRegion?.(0, 0, 1170, 825);
+          if (Array.isArray(region)) {
+            const types: Record<string, number> = {};
+            for (const p of region) {
+              const t = p?.getState_PrimitiveType?.() || sp?.getPrimitiveTypeByPrimitiveId?.(p?.getState_PrimitiveId?.()) || 'unknown';
+              types[t] = (types[t] || 0) + 1;
+            }
+            results6.regionPrimitives = { total: region.length, types };
+            // Get first few wire-like primitives
+            const samples: any[] = [];
+            for (const p of region.slice(0, 100)) {
+              const pid = p?.getState_PrimitiveId?.() || '';
+              if (!pid) continue;
+              let ptype = '';
+              try { ptype = await sp?.getPrimitiveTypeByPrimitiveId?.(pid) || ''; } catch {}
+              if (ptype === 'Wire' || ptype === 'wire' || ptype === 'WIRE') {
+                const s: Record<string, any> = { primitiveId: pid, type: ptype };
+                for (const k of getAllKeys(p)) {
+                  try {
+                    const v = p[k];
+                    if (typeof v === 'function' && k.startsWith('getState_')) s[k.replace('getState_', '')] = v.call(p);
+                  } catch {}
+                }
+                samples.push(s);
+                if (samples.length >= 3) break;
+              }
+            }
+            results6.wireSamples = samples;
+          } else {
+            results6.regionPrimitives = region;
+          }
+        } catch (e) { results6.regionPrimitives = `error: ${e}`; }
+
+        // Get actual wire data via sch_PrimitiveWire.get()
+        const wireIds = results6.wireIds;
+        if (Array.isArray(wireIds) && wireIds.length > 0) {
+          const wireSamples2: any[] = [];
+          // Get last 3 wires (most recently created, likely includes user's manual wire)
+          const sampleIds = wireIds.slice(-3);
+          for (const wid of sampleIds) {
+            try {
+              const w = await sw?.get?.(wid);
+              if (w) {
+                const s: Record<string, any> = { primitiveId: wid };
+                for (const k of getAllKeys(w)) {
+                  try {
+                    const v = w[k];
+                    if (typeof v === 'function' && k.startsWith('getState_')) {
+                      s[k.replace('getState_', '')] = v.call(w);
+                    } else if (typeof v !== 'function') {
+                      s[k] = v;
+                    }
+                  } catch {}
+                }
+                wireSamples2.push(s);
+              }
+            } catch (e) { wireSamples2.push({ primitiveId: wid, error: String(e) }); }
+          }
+          results6.wireData = wireSamples2;
+        }
+
+        data = results6;
+        break;
+      }
+      case 'sch_get_all_pins': {
+        // Get all pins for all components with positions
+        const api5 = anyEda() as any;
+        const schC = api5?.sch_PrimitiveComponent;
+        if (!schC?.getAll || !schC?.getAllPinsByPrimitiveId) {
+          data = { error: 'API not available' }; break;
+        }
+        const allComps = await schC.getAll(undefined, true);
+        const result5: any[] = [];
+        for (const comp of (Array.isArray(allComps) ? allComps : [])) {
+          const cId = comp?.getState_PrimitiveId?.() || '';
+          const desig = comp?.getState_Designator?.() || '';
+          if (!cId) continue;
+          try {
+            const pins = await schC.getAllPinsByPrimitiveId(cId);
+            const pinList = (Array.isArray(pins) ? pins : []).map((p: any) => {
+              const out: Record<string, any> = {};
+              for (const k of getAllKeys(p)) {
+                try {
+                  const v = p[k];
+                  if (typeof v === 'function' && k.startsWith('getState_')) {
+                    out[k.replace('getState_', '')] = v.call(p);
+                  }
+                } catch { /* */ }
+              }
+              return out;
+            });
+            if (pinList.length > 0) {
+              result5.push({ componentId: cId, designator: desig, pins: pinList });
+            }
+          } catch { /* skip */ }
+        }
+        data = result5;
+        break;
+      }
+      case 'sch_page_info': {
+        const api4 = anyEda() as any;
+        const serialize4 = (obj: any): any => {
+          if (!obj || typeof obj !== 'object') return obj;
+          if (Array.isArray(obj)) return obj.map(serialize4);
+          const out: Record<string, any> = {};
+          for (const k of getAllKeys(obj)) {
+            try { const v = obj[k]; if (typeof v !== 'function') out[k] = v; } catch { /* */ }
+          }
+          return out;
+        };
+        const pageInfo = await api4?.dmt_Schematic?.getCurrentSchematicPageInfo?.();
+        const allPages = await api4?.dmt_Schematic?.getCurrentSchematicAllSchematicPagesInfo?.();
+        const schInfo = await api4?.dmt_Schematic?.getCurrentSchematicInfo?.();
+        data = {
+          currentPage: pageInfo ? serialize4(pageInfo) : null,
+          allPages: allPages ? serialize4(allPages) : null,
+          schematic: schInfo ? serialize4(schInfo) : null,
+        };
+        break;
+      }
+      case 'sch_zoom_all': {
+        const ec = (anyEda() as any)?.dmt_EditorControl;
+        if (ec?.zoomToAllPrimitives) {
+          await ec.zoomToAllPrimitives();
+          data = { success: true, action: 'zoomToAllPrimitives' };
+        } else {
+          data = { success: false, error: 'zoomToAllPrimitives not available' };
+        }
+        break;
+      }
+      case 'sch_navigate': {
+        const sd = (anyEda() as any)?.sch_Document;
+        if (sd?.navigateToCoordinates) {
+          await sd.navigateToCoordinates(cmd.params.x ?? 0, cmd.params.y ?? 0);
+          data = { success: true };
+        } else if (sd?.navigateToRegion) {
+          const { x1, y1, x2, y2 } = cmd.params;
+          await sd.navigateToRegion(x1 ?? 0, y1 ?? 0, x2 ?? 12000, y2 ?? 6000);
+          data = { success: true, method: 'navigateToRegion' };
+        } else {
+          data = { success: false, error: 'no navigate API' };
+        }
+        break;
+      }
+      case 'sch_get_primitive': {
+        const api3 = anyEda() as any;
+        const pid = cmd.params.primitiveId;
+        if (!pid) { data = { error: 'primitiveId required' }; break; }
+        // Try sch_PrimitiveComponent.get first, then generic sch_Primitive
+        let raw3: any;
+        try { raw3 = await api3?.sch_PrimitiveComponent?.get?.(pid); } catch { /* */ }
+        if (!raw3) try { raw3 = await api3?.sch_Primitive?.getPrimitiveByPrimitiveId?.(pid); } catch { /* */ }
+        const serialize3 = (obj: any): any => {
+          if (!obj || typeof obj !== 'object') return obj;
+          if (Array.isArray(obj)) return obj.map(serialize3);
+          const out: Record<string, any> = {};
+          for (const k of getAllKeys(obj)) {
+            try { const v = obj[k]; if (typeof v !== 'function') out[k] = v; } catch { /* */ }
+          }
+          return out;
+        };
+        data = raw3 ? serialize3(raw3) : { error: 'primitive not found' };
+        break;
+      }
+      case 'lib_device_lookup': {
+        // Raw lib_Device.getByLcscIds probe — returns full raw response for debugging
+        const libDevice = (anyEda() as any)?.lib_Device;
+        if (!libDevice?.getByLcscIds) { data = { error: 'lib_Device.getByLcscIds not available' }; break; }
+        const lcscIds: string[] = cmd.params.lcscIds ?? (cmd.params.lcsc ? [cmd.params.lcsc] : []);
+        const raw = await libDevice.getByLcscIds(lcscIds);
+        // Try to extract serializable state from potential proxy objects
+        const serialize = (obj: any): any => {
+          if (!obj || typeof obj !== 'object') return obj;
+          if (Array.isArray(obj)) return obj.map(serialize);
+          const out: Record<string, any> = {};
+          for (const k of getAllKeys(obj)) {
+            try {
+              const v = obj[k];
+              if (typeof v !== 'function') out[k] = v;
+            } catch { /* skip */ }
+          }
+          return out;
+        };
+        data = { count: Array.isArray(raw) ? raw.length : -1, raw: serialize(raw) };
+        break;
+      }
+      case 'sch_probe_create': {
+        // Probe sch_PrimitiveComponent.create with various arg combinations using a timeout
+        const api2 = anyEda() as any;
+        const sc = api2?.sch_PrimitiveComponent;
+        const { libraryUuid: lUuid2, componentUuid: cUuid2, x: px, y: py } = cmd.params;
+        const pageInfo = await api2?.dmt_Schematic?.getCurrentSchematicPageInfo?.();
+        const pageUuid = pageInfo?.uuid || pageInfo?.getState_Uuid?.() || '';
+
+        const tryCreate = async (args: any[]): Promise<any> => {
+          return Promise.race([
+            sc.create(...args),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('5s timeout')), 5000)),
+          ]);
+        };
+
+        const attempts: Array<{ label: string; args: any[] }> = [
+          { label: 'create({lUuid,uuid},x,y,0)', args: [{ libraryUuid: lUuid2, uuid: cUuid2 }, px, py, 0] },
+          { label: 'create({lUuid,uuid},x,y,0,false)', args: [{ libraryUuid: lUuid2, uuid: cUuid2 }, px, py, 0, false] },
+          { label: 'create({lUuid,uuid},pageUuid,x,y,0)', args: [{ libraryUuid: lUuid2, uuid: cUuid2 }, pageUuid, px, py, 0] },
+          { label: 'create({lUuid,uuid},pageUuid,x,y,0,false)', args: [{ libraryUuid: lUuid2, uuid: cUuid2 }, pageUuid, px, py, 0, false] },
+        ];
+
+        const results2: Record<string, any> = { pageUuid };
+        for (const { label, args } of attempts) {
+          try {
+            const r = await tryCreate(args);
+            const id2 = r?.getState_PrimitiveId?.() || r?.primitiveId || JSON.stringify(r);
+            results2[label] = { ok: true, primitiveId: id2 };
+            break; // stop on first success
+          } catch (e) {
+            results2[label] = { ok: false, error: e instanceof Error ? e.message : String(e) };
+          }
+        }
+        data = results2;
+        break;
+      }
       default:
         throw new Error(`unknown action: ${cmd.action}`);
     }
@@ -2331,11 +3421,69 @@ async function writeResult(result: BridgeResult): Promise<void> {
   await writeTextFile(RESULT_FILE, JSON.stringify(result, null, 2));
 }
 
+/** HTTP-based poll: returns true if HTTP transport worked (regardless of whether a command was found) */
+async function pollOnceViaHttp(): Promise<boolean> {
+  const g = globalThis as any;
+  if (typeof g.fetch !== 'function') return false;
+  try {
+    const resp = await g.fetch(`${HTTP_BASE}/api/command`);
+    if (!resp) return false;
+    if (resp.status === 204) return true;   // HTTP works, no pending command
+    if (resp.status !== 200) return false;   // HTTP unavailable, fall back to file
+
+    const text: string = await resp.text();
+    if (!text || !text.trim()) return true;
+
+    let cmd: BridgeCommand;
+    try { cmd = JSON.parse(text) as BridgeCommand; } catch { return true; }
+    if (!cmd || typeof cmd.timestamp !== 'number') return true;
+    if (cmd.timestamp <= lastCommandTime) return true;
+
+    lastCommandTime = cmd.timestamp;
+    log(`executing command (http): ${cmd.action} id=${cmd.id}`);
+    const result = await executeCommand(cmd);
+    log(`command done (http): ${cmd.action} id=${cmd.id} -> ${result.success ? 'ok' : result.error}`);
+
+    // Try HTTP POST first, fall back to file if POST fails (some EDA runtimes don't support fetch POST)
+    let resultDelivered = false;
+    try {
+      const postResp = await g.fetch(`${HTTP_BASE}/api/result`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(result),
+      });
+      if (postResp && (postResp.status === 200 || postResp.ok)) {
+        resultDelivered = true;
+        log(`result delivered via HTTP POST: id=${result.id}`);
+      } else {
+        log(`result POST returned status=${postResp?.status}, falling back to file`);
+      }
+    } catch (e) {
+      log(`result POST failed (${e instanceof Error ? e.message : String(e)}), falling back to file`);
+    }
+
+    if (!resultDelivered) {
+      await writeTextFile(RESULT_FILE, JSON.stringify(result, null, 2));
+      log(`result delivered via file fallback: id=${result.id}`);
+    }
+
+    return true;
+  } catch (e) {
+    log(`pollOnceViaHttp error: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
+}
+
 async function pollOnce(): Promise<void> {
   if (!bridgeEnabled || pollInProgress) return;
 
   pollInProgress = true;
   try {
+    // Try HTTP first (bypasses file system API restrictions)
+    const httpOk = await pollOnceViaHttp();
+    if (httpOk) return;
+
+    // Fall back to file-based polling
     const cmd = await readCommand();
     if (!cmd) return;
 
@@ -2343,7 +3491,7 @@ async function pollOnce(): Promise<void> {
     await clearCommand();
     const result = await executeCommand(cmd);
     await writeResult(result);
-    log(`command done: ${cmd.action} -> ${result.success ? 'ok' : 'fail'}`);
+    log(`command done (file): ${cmd.action} -> ${result.success ? 'ok' : 'fail'}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     log(`poll error: ${message}`);
@@ -2694,6 +3842,7 @@ export function showStatus(): void {
       `Poll interval: ${POLL_INTERVAL_MS}ms`,
       `Timer: ${getTimerMode()}`,
       `File API: ${getFileApiMode()}`,
+      `HTTP fetch: ${typeof (globalThis as any).fetch === 'function' ? 'available' : 'unavailable'}`,
       `WS: ${wsConnected ? 'connected' : 'disconnected'}`,
       `Last command time: ${lastCommandTime || '(none)'}`,
     ];

@@ -351,6 +351,125 @@ function buildToolRegistry(bridge: BridgeClient): AgentTool[] {
       execute: async (p) => bridge.command('run_sch_drc', p),
     },
 
+    // --- P0.1: 原理图扩展 ---
+    simple('sch_get_all_pins', 'sch_get_all_pins', '获取所有元件的引脚信息（含位置坐标）'),
+    simple('sch_page_info', 'sch_page_info', '获取原理图页面信息'),
+    simple('sch_save', 'sch_save', '保存当前原理图'),
+    simple('sch_auto_route', 'sch_auto_route', '原理图自动布线'),
+    simple('sch_zoom_all', 'sch_zoom_all', '缩放至显示所有原理图图元'),
+    simple('sch_delete_all_wires', 'sch_delete_all_wires', '删除原理图中所有导线'),
+    {
+      name: 'sch_set_title_block', description: '修改原理图标题栏字段',
+      input_schema: {
+        type: 'object', properties: {
+          pageUuid: { type: 'string', description: '原理图页面 UUID' },
+          fields: { type: 'object', description: '标题栏字段，如 { Company: "xxx" }' },
+        }, required: ['pageUuid', 'fields'],
+      },
+      execute: async (p) => bridge.command('sch_set_title_block', p),
+    },
+    {
+      name: 'sch_modify_component', description: '修改原理图元件位号',
+      input_schema: {
+        type: 'object', properties: {
+          primitiveId: { type: 'string', description: '元件图元 ID' },
+          designator: { type: 'string', description: '新位号' },
+        }, required: ['primitiveId', 'designator'],
+      },
+      execute: async (p) => bridge.command('sch_set_designator', p),
+    },
+    {
+      name: 'sch_navigate', description: '导航到原理图指定坐标或区域',
+      input_schema: {
+        type: 'object', properties: {
+          x: { type: 'number', description: '目标 X 坐标（mil）' },
+          y: { type: 'number', description: '目标 Y 坐标（mil）' },
+        }, required: [],
+      },
+      execute: async (p) => bridge.command('sch_navigate', p),
+    },
+    {
+      name: 'sch_get_primitive', description: '通过图元 ID 获取原理图图元详情',
+      input_schema: {
+        type: 'object', properties: {
+          primitiveId: { type: 'string', description: '图元 ID' },
+        }, required: ['primitiveId'],
+      },
+      execute: async (p) => bridge.command('sch_get_primitive', p),
+    },
+
+    // --- P0.1: PCB 扩展 ---
+    {
+      name: 'pcb_add_text', description: '在 PCB 上添加文字',
+      input_schema: {
+        type: 'object', properties: {
+          text: { type: 'string', description: '文字内容' },
+          x: { type: 'number', description: 'X 坐标（mil）' },
+          y: { type: 'number', description: 'Y 坐标（mil）' },
+          layer: { type: 'number', description: '层号（3=顶层丝印）' },
+          fontSize: { type: 'number', description: '字号（mil）' },
+        }, required: ['text'],
+      },
+      execute: async (p) => bridge.command('pcb_add_text', p),
+    },
+    simple('pcb_get_layers', 'pcb_get_layers', '获取 PCB 所有图层信息'),
+    simple('pcb_coord_convert', 'pcb_coord_debug', 'PCB 坐标系调试'),
+
+    // --- P0.2: 制造数据导出 ---
+    simple('pcb_export_gerber', 'pcb_export_gerber', '导出 Gerber 制造文件'),
+    simple('pcb_export_bom', 'pcb_export_bom', '导出 PCB BOM'),
+    simple('pcb_export_pick_place', 'pcb_export_pick_place', '导出贴片坐标文件'),
+    simple('pcb_export_3d', 'pcb_export_3d', '导出 3D 模型文件'),
+    simple('pcb_export_pdf', 'pcb_export_pdf', '导出 PDF 文件'),
+    simple('pcb_export_dxf', 'pcb_export_dxf', '导出 DXF 文件'),
+    simple('pcb_export_dsn', 'pcb_export_dsn', '导出 DSN 文件'),
+    simple('pcb_export_ipc356', 'pcb_export_ipc356', '导出 IPC-D-356A 网表'),
+    simple('pcb_export_odb', 'pcb_export_odb', '导出 ODB++ 数据包'),
+    simple('pcb_export_netlist', 'pcb_export_netlist', '导出 PCB 网表文件'),
+    simple('pcb_get_manufacture_data', 'pcb_get_manufacture_data', '获取制造数据概览'),
+
+    // --- P0.3: 图层管理 ---
+    {
+      name: 'pcb_set_layer_count', description: '设置 PCB 铜层数量',
+      input_schema: {
+        type: 'object', properties: {
+          count: { type: 'number', description: '铜层数量（偶数）' },
+        }, required: ['count'],
+      },
+      execute: async (p) => bridge.command('pcb_set_layer_count', p),
+    },
+    {
+      name: 'pcb_set_layer_visible', description: '设置图层可见/隐藏',
+      input_schema: {
+        type: 'object', properties: {
+          layerId: { type: 'string', description: '图层 ID' },
+          visible: { type: 'boolean', description: 'true=可见, false=隐藏' },
+        }, required: ['layerId', 'visible'],
+      },
+      execute: async (p) => bridge.command('pcb_set_layer_visible', p),
+    },
+    {
+      name: 'pcb_lock_layer', description: '锁定/解锁图层',
+      input_schema: {
+        type: 'object', properties: {
+          layerId: { type: 'string', description: '图层 ID' },
+          locked: { type: 'boolean', description: 'true=锁定, false=解锁' },
+        }, required: ['layerId', 'locked'],
+      },
+      execute: async (p) => bridge.command('pcb_lock_layer', p),
+    },
+    simple('pcb_get_all_nets', 'pcb_get_all_nets', '获取所有网络名称列表'),
+    {
+      name: 'lib_device_lookup', description: '通过 LCSC 编号查询器件库详情',
+      input_schema: {
+        type: 'object', properties: {
+          lcsc: { type: 'string', description: 'LCSC 编号' },
+          lcscIds: { type: 'array', items: { type: 'string' }, description: 'LCSC 编号数组（批量）' },
+        }, required: [],
+      },
+      execute: async (p) => bridge.command('lib_device_lookup', p),
+    },
+
     // --- 计算工具（纯数学，不走 bridge）---
     {
       name: 'calc_impedance', description: '计算走线阻抗或根据目标阻抗反算线宽',
