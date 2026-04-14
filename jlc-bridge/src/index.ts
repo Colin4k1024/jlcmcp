@@ -2809,15 +2809,27 @@ async function executeCommand(cmd: BridgeCommand): Promise<BridgeResult> {
       }
       case 'sch_modify_props': {
         const schMod3 = (anyEda() as any)?.sch_PrimitiveComponent;
-        if (!schMod3?.modify) { data = { error: 'modify not available' }; break; }
+        const schPinMod = (anyEda() as any)?.sch_PrimitivePin;
         const pid3 = cmd.params.primitiveId;
         const props3 = cmd.params.properties;
         if (!pid3 || !props3) { data = { error: 'primitiveId and properties required' }; break; }
-        try {
-          await schMod3.modify(pid3, props3);
-          data = { success: true, primitiveId: pid3, properties: props3 };
-        } catch (e) {
-          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        // Try component-level modify first; fall back to pin-level modify
+        if (schMod3?.modify) {
+          try {
+            await schMod3.modify(pid3, props3);
+            data = { success: true, primitiveId: pid3, properties: props3 };
+            break;
+          } catch (_e) { /* fall through to pin modify */ }
+        }
+        if (schPinMod?.modify) {
+          try {
+            await schPinMod.modify(pid3, props3);
+            data = { success: true, primitiveId: pid3, properties: props3, via: 'pin' };
+          } catch (e) {
+            data = { success: false, error: e instanceof Error ? e.message : String(e) };
+          }
+        } else {
+          data = { error: 'modify not available' };
         }
         break;
       }
@@ -2829,6 +2841,32 @@ async function executeCommand(cmd: BridgeCommand): Promise<BridgeResult> {
         try {
           await schDel.delete(pidDel);
           data = { success: true, deleted: pidDel };
+        } catch (e) {
+          data = { success: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        break;
+      }
+      case 'sch_set_pin_no_connect': {
+        // Set NoConnected flag on a component pin via getAllPinsByPrimitiveId + setState_NoConnected + done
+        const schComp = (anyEda() as any)?.sch_PrimitiveComponent;
+        if (!schComp?.getAllPinsByPrimitiveId) { data = { error: 'getAllPinsByPrimitiveId not available' }; break; }
+        const pinPrimitiveId: string = cmd.params.pinPrimitiveId;
+        const noConnect: boolean = cmd.params.noConnect !== false; // default true
+        if (!pinPrimitiveId) { data = { error: 'pinPrimitiveId required' }; break; }
+        // Component ID is the part before "-e" suffix
+        const compId = pinPrimitiveId.includes('-e') ? pinPrimitiveId.split('-e')[0] : pinPrimitiveId;
+        try {
+          const pins: any[] = await schComp.getAllPinsByPrimitiveId(compId);
+          const pin = pins.find((p: any) => {
+            try { return p.getState_PrimitiveId?.() === pinPrimitiveId; } catch { return false; }
+          });
+          if (!pin) {
+            data = { success: false, error: `pin ${pinPrimitiveId} not found in component ${compId}`, available: pins.map((p: any) => { try { return p.getState_PrimitiveId?.(); } catch { return null; } }) };
+            break;
+          }
+          pin.setState_NoConnected(noConnect);
+          await pin.done();
+          data = { success: true, pinPrimitiveId, noConnect, compId };
         } catch (e) {
           data = { success: false, error: e instanceof Error ? e.message : String(e) };
         }

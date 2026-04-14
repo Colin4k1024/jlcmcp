@@ -138,6 +138,14 @@ export function registerSchematicTools(server: any, bridge: BridgeClient) {
     return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
   });
 
+  server.tool('sch_set_pin_no_connect', '为元件引脚设置非连接标识（X标记），用于消除悬空引脚DRC警告', {
+    pinPrimitiveId: z.string().describe('引脚图元 ID，格式为 componentId-eN，如 faf351a6da2b1236-e52'),
+    noConnect: z.boolean().optional().describe('是否设置非连接（默认 true）'),
+  }, async ({ pinPrimitiveId, noConnect }: { pinPrimitiveId: string; noConnect?: boolean }) => {
+    const data = await bridge.command('sch_set_pin_no_connect', { pinPrimitiveId, noConnect });
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
   server.tool('sch_delete_all_wires', '删除原理图中所有导线', {}, async () => {
     const data = await bridge.command('sch_delete_all_wires');
     return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
